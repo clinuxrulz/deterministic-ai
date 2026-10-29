@@ -25,6 +25,11 @@ gain_start = 1.0
 gain_end = 32.0
 anneal_fraction = 0.85
 
+# Greedy hill-climb over the wire list after training, scoring each candidate
+# swap on a fixed sample of training rows.
+polish_sweeps = 2
+polish_samples = 512
+
 seed = 42
 log_every = 10
 val_every = 25

@@ -24,6 +24,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use xorae_core::bits::{plane_hamming, BitBatch};
 use xorae_core::circuit::{Circuit, Gate, Op};
 use xorae_core::{BinarizeMode, GateSet, Model, ModelConfig, ModelMetrics};
 
@@ -64,6 +65,12 @@ pub struct NandConfig {
     /// Fraction of training over which the candidate softmax is sharpened.
     #[serde(default = "default_anneal_fraction")]
     pub anneal_fraction: f32,
+    /// Greedy sweeps over the discrete wire list after training. Zero disables.
+    #[serde(default = "default_polish_sweeps")]
+    pub polish_sweeps: usize,
+    /// Training samples used to score a candidate wire swap.
+    #[serde(default = "default_polish_samples")]
+    pub polish_samples: usize,
     pub seed: u64,
     #[serde(default = "default_log_every")]
     pub log_every: usize,
@@ -94,6 +101,12 @@ fn default_gain_end() -> f32 {
 }
 fn default_anneal_fraction() -> f32 {
     0.85
+}
+fn default_polish_sweeps() -> usize {
+    2
+}
+fn default_polish_samples() -> usize {
+    512
 }
 fn default_log_every() -> usize {
     10
@@ -632,6 +645,174 @@ fn assemble(
     }
 }
 
+/// Absolute wire indices of every candidate for every gate, in circuit order.
+fn candidate_wires(
+    layers: &[Layer],
+    group_start: usize,
+    n_inputs: usize,
+    k: usize,
+) -> Vec<Vec<u16>> {
+    let gate_start = n_inputs + 2;
+    let mut local_start = Vec::with_capacity(layers.len());
+    let mut total = 0usize;
+    for layer in layers {
+        local_start.push(total);
+        total += layer.n_out;
+    }
+    let mut out = Vec::with_capacity(total);
+    for layer in layers {
+        for j in 0..layer.n_out {
+            let mut wires = Vec::with_capacity(k);
+            for c in 0..k {
+                let src = layer.cand_layer[j * k + c] as usize;
+                let idx = layer.cand_idx[j * k + c] as usize;
+                let w = if src == group_start {
+                    idx
+                } else {
+                    gate_start + local_start[src - group_start - 1] + idx
+                };
+                wires.push(w as u16);
+            }
+            out.push(wires);
+        }
+    }
+    out
+}
+
+/// Fast BER evaluator with reusable arenas.
+struct Evaluator {
+    batch: BitBatch,
+    enc_arena: Vec<u64>,
+    key_planes: Vec<u64>,
+    dec_arena: Vec<u64>,
+    recon: Vec<u64>,
+    denom: f32,
+}
+
+impl Evaluator {
+    fn new(batch: BitBatch) -> Self {
+        let denom = (batch.len.max(1) * batch.cols.max(1)) as f32;
+        Self {
+            batch,
+            enc_arena: Vec::new(),
+            key_planes: Vec::new(),
+            dec_arena: Vec::new(),
+            recon: Vec::new(),
+            denom,
+        }
+    }
+
+    fn ber(&mut self, encoder: &Circuit, decoder: &Circuit) -> f32 {
+        encoder.eval_into(
+            &self.batch.planes,
+            self.batch.words,
+            &mut self.enc_arena,
+            &mut self.key_planes,
+        );
+        decoder.eval_into(
+            &self.key_planes,
+            self.batch.words,
+            &mut self.dec_arena,
+            &mut self.recon,
+        );
+        let errors = plane_hamming(
+            &self.recon,
+            &self.batch.planes,
+            self.batch.cols,
+            self.batch.words,
+            self.batch.len,
+        );
+        errors as f32 / self.denom
+    }
+}
+
+/// Greedy hill-climb over the wire list.
+///
+/// Each move re-points one gate input at another of its trained candidates and
+/// keeps the change if the measured BER improves. This optimises the real
+/// discrete objective, which the soft relaxation can only approximate.
+fn polish(
+    encoder: &mut Circuit,
+    decoder: &mut Circuit,
+    enc_cands: &[Vec<u16>],
+    dec_cands: &[Vec<u16>],
+    eval: &mut Evaluator,
+    sweeps: usize,
+) -> f32 {
+    let mut best = eval.ber(encoder, decoder);
+    for sweep in 0..sweeps {
+        let mut improved = 0usize;
+
+        let base = encoder.gate_start();
+        for (i, cand) in enc_cands.iter().enumerate() {
+            let limit = base + i;
+            for side in 0..2 {
+                let orig = if side == 0 {
+                    encoder.gates[i].a
+                } else {
+                    encoder.gates[i].b
+                };
+                for &w in cand {
+                    if w == orig || w as usize >= limit {
+                        continue;
+                    }
+                    if side == 0 {
+                        encoder.gates[i].a = w;
+                    } else {
+                        encoder.gates[i].b = w;
+                    }
+                    let score = eval.ber(encoder, decoder);
+                    if score + 1e-9 < best {
+                        best = score;
+                        improved += 1;
+                    } else if side == 0 {
+                        encoder.gates[i].a = orig;
+                    } else {
+                        encoder.gates[i].b = orig;
+                    }
+                }
+            }
+        }
+
+        let base = decoder.gate_start();
+        for (i, cand) in dec_cands.iter().enumerate() {
+            let limit = base + i;
+            for side in 0..2 {
+                let orig = if side == 0 {
+                    decoder.gates[i].a
+                } else {
+                    decoder.gates[i].b
+                };
+                for &w in cand {
+                    if w == orig || w as usize >= limit {
+                        continue;
+                    }
+                    if side == 0 {
+                        decoder.gates[i].a = w;
+                    } else {
+                        decoder.gates[i].b = w;
+                    }
+                    let score = eval.ber(encoder, decoder);
+                    if score + 1e-9 < best {
+                        best = score;
+                        improved += 1;
+                    } else if side == 0 {
+                        decoder.gates[i].a = orig;
+                    } else {
+                        decoder.gates[i].b = orig;
+                    }
+                }
+            }
+        }
+
+        eprintln!("polish sweep {sweep}: BER {best:.4}, {improved} accepted moves");
+        if improved == 0 {
+            break;
+        }
+    }
+    best
+}
+
 pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<Model> {
     cfg.validate()?;
     if dataset.size != cfg.image_size {
@@ -748,7 +929,41 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
     }
     log.flush()?;
 
-    let (encoder, decoder) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
+    let (mut encoder, mut decoder) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
+    if cfg.polish_sweeps > 0 {
+        let k = trainer.net.k;
+        let enc_cands = candidate_wires(
+            &trainer.net.layers[..trainer.net.enc_layers],
+            0,
+            trainer.net.n_inputs,
+            k,
+        );
+        let dec_cands = candidate_wires(
+            &trainer.net.layers[trainer.net.enc_layers..],
+            trainer.net.enc_layers,
+            trainer.net.key_bits,
+            k,
+        );
+        let n = cfg.polish_samples.min(train_pool.len()).max(1);
+        let idxs: Vec<usize> = (0..n)
+            .map(|i| train_pool[i * train_pool.len() / n])
+            .collect();
+        let batch = BitBatch::from_matrix(&dataset.bits, &idxs);
+        let mut eval = Evaluator::new(batch);
+        let before = eval.ber(&encoder, &decoder);
+        eprintln!("polishing wire list on {} training samples", idxs.len());
+        let after = polish(
+            &mut encoder,
+            &mut decoder,
+            &enc_cands,
+            &dec_cands,
+            &mut eval,
+            cfg.polish_sweeps,
+        );
+        eprintln!("polish: {before:.4} -> {after:.4} on the polish sample");
+        encoder.validate().map_err(anyhow::Error::msg)?;
+        decoder.validate().map_err(anyhow::Error::msg)?;
+    }
     let mut model = make_model(dataset, cfg, encoder, decoder);
     if let Ok(report) = crate::ga::evaluate_model(&model, dataset, &val_pool) {
         model.metrics.val_ber = report.ber;
@@ -813,6 +1028,8 @@ mod tests {
             gain_start: 1.0,
             gain_end: 32.0,
             anneal_fraction: 0.85,
+            polish_sweeps: 0,
+            polish_samples: 32,
             seed: 3,
             log_every: 0,
             val_every: 0,
