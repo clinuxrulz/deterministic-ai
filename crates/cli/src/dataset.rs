@@ -7,7 +7,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use xorae_core::bits::BitMatrix;
 use xorae_core::color::{indices_to_bits, nearest_palette_index, ColorMode, Rgb};
-use xorae_core::preprocess::{binarize, resize_box, rgb_to_gray, PreprocessOptions};
+use xorae_core::preprocess::{binarize, quantize2, resize_box, rgb_to_gray, PreprocessOptions};
 
 pub const CIFAR_RECORD: usize = 1 + 32 * 32 * 3;
 pub const CIFAR_CLASS_CAT: u8 = 3;
@@ -181,6 +181,39 @@ impl Dataset {
         }
     }
 
+    /// Build an RGB 2-bit/channel dataset. Rows are channel-major with two
+    /// planes per channel: `[R_hi, R_lo, G_hi, G_lo, B_hi, B_lo]`.
+    pub fn from_rgb2_parts(
+        size: usize,
+        rows: Vec<Vec<u8>>,
+        gray: Vec<u8>,
+        rgb: Vec<u8>,
+        is_test: Vec<bool>,
+        split_mode: SplitMode,
+    ) -> Self {
+        let n = rows.len();
+        let pixels = size * size;
+        assert_eq!(gray.len(), n * pixels);
+        assert_eq!(rgb.len(), n * pixels * 3);
+        assert_eq!(is_test.len(), n);
+        assert!(rows.iter().all(|row| row.len() == pixels * 6));
+
+        Self {
+            size,
+            n,
+            bits: BitMatrix::from_bit_rows(&rows),
+            gray,
+            rgb,
+            values: vec![0u8; n * pixels],
+            palette: Vec::new(),
+            color_mode: ColorMode::Rgb2,
+            bits_per_pixel: 1,
+            channels: 6,
+            is_test,
+            split_mode,
+        }
+    }
+
     /// Deterministic train/validation/test split.
     ///
     /// `test` comes from the dataset's own test flag (CIFAR's test batch).
@@ -253,6 +286,7 @@ impl Dataset {
             ColorMode::Grayscale => 0,
             ColorMode::Palette => 1,
             ColorMode::Rgb1 => 2,
+            ColorMode::Rgb2 => 3,
         }])?;
         w.write_all(&[self.bits_per_pixel as u8])?;
         w.write_all(&[match self.split_mode {
@@ -306,6 +340,7 @@ impl Dataset {
             0 => ColorMode::Grayscale,
             1 => ColorMode::Palette,
             2 => ColorMode::Rgb1,
+            3 => ColorMode::Rgb2,
             other => bail!("unknown color mode {other}"),
         };
         let mut bpp = [0u8; 1];
@@ -611,6 +646,69 @@ pub fn load_cifar10_rgb1(dir: &Path, class: u8, size: usize, threshold: u8) -> R
     }
 
     Ok(Dataset::from_rgb1_parts(
+        size,
+        rows,
+        gray,
+        rgb,
+        is_test,
+        SplitMode::Hash,
+    ))
+}
+
+/// Load CIFAR-10 and quantise each channel to 2 bits (4 levels, 64 colours).
+///
+/// Rows are six channel-major planes: `[R_hi, R_lo, G_hi, G_lo, B_hi, B_lo]`.
+pub fn load_cifar10_rgb2(dir: &Path, class: u8, size: usize) -> Result<Dataset> {
+    let files = cifar_files(dir);
+    let pixels = size * size;
+    let mut rows: Vec<Vec<u8>> = Vec::new();
+    let mut gray: Vec<u8> = Vec::new();
+    let mut rgb: Vec<u8> = Vec::new();
+    let mut is_test: Vec<bool> = Vec::new();
+
+    for path in files {
+        let data = std::fs::read(&path)
+            .with_context(|| format!("reading CIFAR batch {}", path.display()))?;
+        if data.len() % CIFAR_RECORD != 0 {
+            bail!(
+                "{} has length {}, which is not a multiple of {}",
+                path.display(),
+                data.len(),
+                CIFAR_RECORD
+            );
+        }
+        let test_file = path.file_name().and_then(|s| s.to_str()) == Some("test_batch.bin");
+        for record in data.chunks_exact(CIFAR_RECORD) {
+            if record[0] != class {
+                continue;
+            }
+            let (red, green, blue) = planar_channels(record);
+            let small_rgb = resize_rgb_box(red, green, blue, 32, 32, size);
+            let small_gray = rgb_to_gray(size, size, &small_rgb);
+            let mut row = Vec::with_capacity(pixels * 6);
+            for channel in 0..3 {
+                let mut hi = vec![0u8; pixels];
+                let mut lo = vec![0u8; pixels];
+                for p in 0..pixels {
+                    let level = quantize2(small_rgb[p * 3 + channel]);
+                    hi[p] = (level >> 1) & 1;
+                    lo[p] = level & 1;
+                }
+                row.extend_from_slice(&hi);
+                row.extend_from_slice(&lo);
+            }
+            rows.push(row);
+            gray.extend_from_slice(&small_gray);
+            rgb.extend_from_slice(&small_rgb);
+            is_test.push(test_file);
+        }
+    }
+
+    if rows.is_empty() {
+        bail!("no images with class {} found in {}", class, dir.display());
+    }
+
+    Ok(Dataset::from_rgb2_parts(
         size,
         rows,
         gray,

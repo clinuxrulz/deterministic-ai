@@ -12,6 +12,9 @@ pub enum ColorMode {
     Palette,
     /// Three binary channels (R, G, B), one bit per channel per pixel.
     Rgb1,
+    /// Six binary planes: two bits per channel (`R_hi, R_lo, G_hi, G_lo,
+    /// B_hi, B_lo`). Four levels per channel, so 64 colours per pixel.
+    Rgb2,
 }
 
 pub type Rgb = [u8; 3];

@@ -48,6 +48,9 @@ enum CliCommand {
         /// Build a 3-channel 1-bit RGB dataset (8 colors).
         #[arg(long)]
         rgb1: bool,
+        /// Build a 3-channel 2-bit RGB dataset (64 colors).
+        #[arg(long)]
+        rgb2: bool,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -130,6 +133,22 @@ enum CliCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Exact simplification (constant folding + CSE + dead-gate removal).
+    ///
+    /// Rewrites are Boolean identities, so the output computes the same
+    /// function as the input for every possible input vector.
+    Simplify {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Dataset used to prove the simplified model reconstructs identically.
+        #[arg(long)]
+        verify: Option<PathBuf>,
+        /// Also compare both models on N pseudo-random input vectors.
+        #[arg(long, default_value_t = 0)]
+        verify_random: usize,
+    },
     /// Print simple reconstruction baselines.
     Baselines {
         #[arg(long)]
@@ -176,6 +195,7 @@ fn main() -> Result<()> {
             threshold,
             palette,
             rgb1,
+            rgb2,
             seed,
         } => {
             if let Some(palette_size) = palette {
@@ -191,6 +211,21 @@ fn main() -> Result<()> {
                     size,
                     dataset.palette.len(),
                     dataset.bits_per_pixel,
+                    train.len(),
+                    val.len(),
+                    test.len()
+                );
+            } else if rgb2 {
+                let dataset = dataset::load_cifar10_rgb2(&cifar_dir, class, size)?;
+                dataset.save(&out)?;
+                let (train, val, test) = dataset.split_indices(seed);
+                println!(
+                    "wrote {} ({} images, {}x{}, RGB 2-bit/channel (64 colors), {} bits/pixel; {} train / {} val / {} test)",
+                    out.display(),
+                    dataset.n,
+                    size,
+                    size,
+                    dataset.cols(),
                     train.len(),
                     val.len(),
                     test.len()
@@ -360,25 +395,29 @@ fn main() -> Result<()> {
             let indices = split_indices(&dataset, model.config.seed, &split)?;
             let report = ga::evaluate_model(&model, &dataset, &indices)?;
             if dataset.color_mode != ColorMode::Grayscale {
+                let abs_mae = absolute_mae(&model, &dataset, &indices)?;
                 println!(
-                    "{}: color MAE {:.4}, PSNR {:.2} dB, pixel/index accuracy {:.2}%, bit BER {:.4}, exact {:.2}%, active gates {} ({} samples)",
+                    "{}: abs MAE vs original {:.4}, color MAE vs quantised {:.4}, PSNR {:.2} dB, pixel/index accuracy {:.2}%, bit BER {:.4}, exact {:.2}%, active gates {} / AIG nodes {} ({} samples)",
                     split,
+                    abs_mae,
                     report.color_mae,
                     report.psnr,
                     report.index_accuracy * 100.0,
                     report.ber,
                     report.exact_rate * 100.0,
                     report.active_gates,
+                    model.encoder.aig_nodes() + model.decoder.aig_nodes(),
                     report.n
                 );
             } else {
                 println!(
-                    "{}: BER {:.4}, exact {:.2}%, key entropy {:.3}, active gates {} ({} samples)",
+                    "{}: BER {:.4}, exact {:.2}%, key entropy {:.3}, active gates {} / AIG nodes {} ({} samples)",
                     split,
                     report.ber,
                     report.exact_rate * 100.0,
                     report.key_entropy,
                     report.active_gates,
+                    model.encoder.aig_nodes() + model.decoder.aig_nodes(),
                     report.n
                 );
             }
@@ -409,6 +448,75 @@ fn main() -> Result<()> {
             }
             std::fs::write(&out, json)?;
             println!("exported model to {}", out.display());
+            Ok(())
+        }
+        CliCommand::Simplify {
+            model,
+            out,
+            verify,
+            verify_random,
+        } => {
+            let model = load_model(&model)?;
+            let (encoder, enc_stats) = model.encoder.simplify();
+            let (decoder, dec_stats) = model.decoder.simplify();
+            let mut simplified = model.clone();
+            simplified.encoder = encoder;
+            simplified.decoder = decoder;
+            simplified.validate().map_err(anyhow::Error::msg)?;
+            if verify_random > 0 {
+                verify_random_inputs(&model, &simplified, verify_random, model.config.seed)?;
+                println!(
+                    "verified: identical keys and reconstructions on {verify_random} random inputs"
+                );
+            }
+            if let Some(data) = verify {
+                let dataset = Dataset::load(&data)?;
+                let idx: Vec<usize> = (0..dataset.n).collect();
+                verify_identical(&model, &simplified, &dataset, &idx)?;
+                println!(
+                    "verified: identical reconstructions on all {} samples",
+                    idx.len()
+                );
+            }
+            let gates_before = model.encoder.gates.len() + model.decoder.gates.len();
+            let gates_after = simplified.encoder.gates.len() + simplified.decoder.gates.len();
+            println!(
+                "simplify: {} -> {} NAND gates ({} fewer, {:.1}%)",
+                gates_before,
+                gates_after,
+                gates_before - gates_after,
+                100.0 * (gates_before - gates_after) as f32 / gates_before as f32
+            );
+            println!(
+                "  encoder: {} -> {} (const {}, identity {}, deduped {}, dead {})",
+                enc_stats.gates_before,
+                enc_stats.gates_after,
+                enc_stats.folded_const,
+                enc_stats.folded_identity,
+                enc_stats.deduped,
+                enc_stats.dead
+            );
+            println!(
+                "  decoder: {} -> {} (const {}, identity {}, deduped {}, dead {})",
+                dec_stats.gates_before,
+                dec_stats.gates_after,
+                dec_stats.folded_const,
+                dec_stats.folded_identity,
+                dec_stats.deduped,
+                dec_stats.dead
+            );
+            println!(
+                "  AIG nodes (inversions free): {} -> {}",
+                model.encoder.aig_nodes() + model.decoder.aig_nodes(),
+                simplified.encoder.aig_nodes() + simplified.decoder.aig_nodes()
+            );
+            simplified.metrics.active_gates =
+                simplified.encoder.active_gates() + simplified.decoder.active_gates();
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&out, simplified.to_json().map_err(anyhow::Error::msg)?)?;
+            println!("wrote {}", out.display());
             Ok(())
         }
         CliCommand::Baselines {
@@ -470,6 +578,69 @@ fn parse_binarize(value: &str) -> Result<BinarizeMode> {
         "dither" => Ok(BinarizeMode::Dither),
         other => bail!("unknown binarize mode {other:?} (use threshold, otsu or dither)"),
     }
+}
+
+/// Check that two models produce identical keys and reconstructions on `idx`.
+fn verify_identical(a: &Model, b: &Model, dataset: &Dataset, idx: &[usize]) -> Result<()> {
+    for &i in idx {
+        let bits = dataset.row_bits(i);
+        let (key_a, rec_a) = a.infer_bits(&bits).map_err(anyhow::Error::msg)?;
+        let (key_b, rec_b) = b.infer_bits(&bits).map_err(anyhow::Error::msg)?;
+        if key_a != key_b || rec_a != rec_b {
+            bail!("sample {i}: simplified model is not equivalent");
+        }
+    }
+    Ok(())
+}
+
+/// Mean absolute RGB error between the reconstruction and the *original*
+/// (unquantised) image, normalised to `0..=1`.
+///
+/// This is the honest visual-fidelity number for colour models: MAE against
+/// the quantised target can look identical for two different palettes even
+/// when one of them reconstructs the original much more closely.
+fn absolute_mae(model: &Model, dataset: &Dataset, indices: &[usize]) -> Result<f32> {
+    let mut total = 0u64;
+    let mut fields = 0usize;
+    for &i in indices {
+        let bits = dataset.row_bits(i);
+        let (_, recon) = model.infer_bits(&bits).map_err(anyhow::Error::msg)?;
+        let rgb = model.bits_to_rgb(&recon);
+        let original = dataset.row_rgb(i);
+        for (a, b) in rgb.iter().zip(original.iter()) {
+            total += (*a as i32 - *b as i32).unsigned_abs() as u64;
+            fields += 1;
+        }
+    }
+    Ok(total as f32 / (fields.max(1) as f32 * 255.0))
+}
+
+/// Compare two models on pseudo-random input vectors (off-distribution check).
+fn verify_random_inputs(a: &Model, b: &Model, count: usize, seed: u64) -> Result<()> {
+    let n = a.input_bits();
+    let mut state = seed | 1;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for sample in 0..count {
+        let mut bits = vec![0u8; n];
+        for (i, chunk) in bits.chunks_mut(64).enumerate() {
+            let word = next();
+            for (j, bit) in chunk.iter_mut().enumerate() {
+                *bit = ((word >> j) & 1) as u8;
+            }
+            let _ = i;
+        }
+        let (ka, ra) = a.infer_bits(&bits).map_err(anyhow::Error::msg)?;
+        let (kb, rb) = b.infer_bits(&bits).map_err(anyhow::Error::msg)?;
+        if ka != kb || ra != rb {
+            bail!("random input {sample}: simplified model is not equivalent");
+        }
+    }
+    Ok(())
 }
 
 fn load_model(path: &PathBuf) -> Result<Model> {

@@ -342,3 +342,134 @@ config's own spread is 0.1657-0.1835, so that "win" was a draw from the same
 distribution. Ask for paired multi-seed comparisons before believing anything
 under ~0.01.
 
+## Checkpoint 3 (2026-10-30): exact simplification
+
+A trained circuit is a Boolean expression, so it can be rewritten without
+changing the function it computes. `Circuit::simplify` does three exact
+rewrites: constant folding, hash-consing (CSE) and dead-gate removal. It is not
+distillation — nothing is approximated and no data is used; the output is
+bit-identical for **every** input vector, not just the dataset.
+
+### Result on the shipped model
+
+| | Before | After |
+|---|---|---|
+| NAND gates | 2,688 | **1,547** (−42.4%) |
+| Active (reachable) gates | 2,165 | 1,547 |
+| AIG nodes (inversions free) | 1,627 | **986** |
+| Model JSON | 213 KB | 128 KB |
+| Test BER | 0.1727 | **0.1727** |
+| Key entropy | 0.926 | 0.926 |
+
+Breakdown: encoder 896 → 551 (9 deduped, 336 dead), decoder 1,792 → 996
+(627 deduped, 169 dead). No gate folded to a constant; the model had already
+been trained away from that.
+
+The 42% figure is higher than a hand count suggests (403 duplicate pairs, 523
+dead gates) because hash-consing is iterative: once two inverters merge, their
+consumers often become identical too.
+
+### Why it is exactly lossless
+
+Every rewrite is a Boolean identity — `NAND(x,0)=1`, `NAND(1,x)=NOT x`,
+`NAND(x,x)=NOT x`, plus "same inputs ⇒ same output". Equivalence is therefore
+by construction; the tests are a check on the implementation, not the argument:
+
+- Unit tests compare the original and simplified circuit **exhaustively over all
+  2^n inputs** for `Universal`, `Full`, `NandOnly`, `XorAnd` and `XorOnly`
+  random circuits, and check idempotence.
+- `xorae simplify --verify <dataset>` compares keys *and* reconstructions for
+  all 6,000 images.
+- `--verify-random N` compares them on N pseudo-random 1,024-bit vectors, i.e.
+  inputs that are nowhere near the training distribution (2,000 used here).
+
+### The AIG caveat
+
+41.9% of the reachable gates are `Nand(x, x)`, i.e. inverters, and only 627 of
+the 907 are distinct wires. In an AND-Inverter Graph a complemented edge is
+free, so those gates collapse into their consumers and the circuit is 986 AND
+nodes. That is the standard way synthesis papers count size, but in CMOS an
+inverter costs area and a wire carries one polarity, so 986 must not be quoted
+as "986 NAND gates". Both numbers are reported, separately labelled.
+
+This also exposes a training inefficiency: the wiring search spends 42% of its
+gate budget implementing negation. See open thread 3 in AGENTS.md.
+
+### Reproduce
+
+```bash
+cargo run --release -p xorae -- simplify \
+  --model web/public/models/cats32-nand.json \
+  --out runs/cats32-nand-simple.json \
+  --verify data/cats32_threshold.bin --verify-random 2000
+```
+
+`train-nand` now runs the same pass automatically after polish, and prints both
+the NAND gate count and the AIG node count.
+## Checkpoint 4 (2026-10-30): colour at 2 bits per channel
+
+RGB1 quantises each channel to one bit, so a pixel is one of 8 fully saturated
+colours and muted browns and greys are unrepresentable. `ColorMode::Rgb2`
+quantises each channel to 2 bits (levels 0/85/170/255, decision boundaries 42,
+128 and 213), giving 64 colours.
+
+Implementation: six bit planes `R_hi, R_lo, G_hi, G_lo, B_hi, B_lo` at
+`size × size`, i.e. `channels = 6` with `bits_per_pixel = 1`. The trainer,
+dataset and evaluator treat that as a tall image exactly like rgb1, so no
+trainer changes were needed. Wired through `preprocess --rgb2`, the `XAE4`
+mode byte, `Model::bits_to_rgb` and the wasm `preprocess` bridge.
+
+Config: 16×16, 1,536 input bits, 192-bit key (8× compression), hidden
+`[768, 384]`, 4,032 gates trained.
+
+### Result: 6 paired seeds (0-4, 42)
+
+| | rgb1 (8 colours) | rgb2 (64 colours) |
+|---|---|---|
+| Input bits | 768 | 1,536 |
+| Key | 96 | 192 |
+| NAND gates after simplify | 1,198 ± 21 | 2,289 ± 39 |
+| AIG nodes | 760 | 1,406 |
+| **Abs MAE vs original** | **0.3561 ± 0.0041** | **0.2362 ± 0.0023** |
+| MAE vs own quantised target | 0.2211 ± 0.0088 | 0.2126 ± 0.0024 |
+| PSNR | 6.47 dB | 9.63 dB |
+| Pixel accuracy (all planes) | 55.4% | 19.5% |
+| Bit BER | 0.2211 | 0.2885 |
+
+Paired difference in absolute MAE: **−0.1199 ± 0.0037**, i.e. 2-bit colour cuts
+reconstruction error by **33.7%** for 1.91× the gates.
+
+### The metric trap that hid this
+
+The first read of these runs said "no gain": bit BER got *worse* (0.2211 →
+0.2885) and MAE against each model's own quantised target was flat (0.2211 →
+0.2126, paired t = −2.6). Both are misleading, for different reasons:
+
+- **Bit BER** weights every plane equally, so it punishes rgb2 for having twice
+  as many planes, and it counts a `lo`-bit error (85 in 8-bit units) the same
+  as a `hi`-bit error (170).
+- **MAE against the quantised target** normalises against a different grid for
+  each mode. A perfect rgb2 model scores 0 on its grid while being ~0.083 away
+  from the original; a perfect rgb1 model is ~0.287 away. The grids are not
+  comparable.
+
+The honest metric is **MAE against the original, unquantised image**, which is
+now printed by `eval`. Measured quantisation floors on this dataset: 0.2870 for
+1 bit/channel, 0.0831 for 2 bits/channel — so rgb1's encoding loss alone
+exceeds its total model error, and no amount of training could get it close to
+the original.
+
+### Against the published colour model
+
+`web/public/models/cats16-rgb1.json` is a GA/XOR+AND model, 128-bit key, 577
+active gates: grid MAE **0.1729** (much better than either NAND model) but
+absolute MAE **0.3341** — worse than rgb2's 0.2362, because its palette cannot
+represent the target. Two lessons: grid MAE flatters coarse palettes, and the
+NAND-only trainer is markedly weaker on colour than on grayscale (577 gates
+beats 1,198 at the same 768-bit input).
+
+### Gate counts
+
+All twelve trained models were run through `simplify --verify`, which also
+re-verified exactness on 6,000 samples each (72,000 comparisons, all identical).
+Gate counts above are post-simplification, so rgb1 and rgb2 are comparable.

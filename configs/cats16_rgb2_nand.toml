@@ -1,0 +1,31 @@
+# RGB 2-bit/channel: 16x16 pixels, 6 bit planes (R_hi, R_lo, G_hi, G_lo,
+# B_hi, B_lo) = 1,536 input bits, 64 colours. 192-bit key keeps 8x.
+#
+# 16x16x6 -> 8x16x6 -> 4x16x6 -> 12x16 (tall-image view) -> key 192
+# 1,344 encoder gates + 1,344 decoder gates = 2,688 NAND gates.
+image_size = 16
+channels = 6
+key_bits = 192
+hidden = [768, 384]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+polish_sweeps = 2
+polish_samples = 512
+
+seed = 42
+log_every = 10
+val_every = 25

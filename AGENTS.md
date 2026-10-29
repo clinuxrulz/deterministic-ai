@@ -21,7 +21,8 @@ described by its wiring.
 
 | Field | Value |
 |---|---|
-| Gates | 2,688 trained, **2,165 after dead-gate pruning** |
+| Gates | 2,688 trained → 2,165 reachable → **1,547 after exact simplification** |
+| AIG nodes | 986 (inversions counted as free — see below) |
 | Gate type | `Nand` only (`gate_set = "nand_only"`) |
 | Input | 32×32 = 1,024 bits (threshold binarized) |
 | Key | 128 bits |
@@ -31,6 +32,11 @@ described by its wiring.
 
 It is the default entry in `web/public/models/index.json` and is verified in a
 headless browser (128 key bits, 8 samples, no JS errors).
+
+**Two gate counts, never mix them.** 1,547 is the number of literal NAND gates.
+986 is the AND-node count in an AIG view where inverted wires are free; in CMOS
+an inverter is *not* free, so 986 is a size metric for comparison with synthesis
+literature, not a claim about hardware.
 
 For comparison: the genetic algorithm reached test BER 0.2097 with 4,096
 XOR+AND gates. Gradient-trained *gate types* (non-NAND) only reached 0.2523, so
@@ -135,13 +141,14 @@ cargo run --release -p xorae -- export \
 | Command | Purpose |
 |---|---|
 | `fetch-data` | Download/extract CIFAR-10 |
-| `preprocess` | Build a cached dataset (`XAE4` format); `--binarize`, `--rgb1`, `--palette` |
+| `preprocess` | Build a cached dataset (`XAE4` format); `--binarize`, `--rgb1` (8 colours), `--rgb2` (64 colours), `--palette` |
 | `train` | Genetic algorithm (legacy track) |
 | `train-grad` | Gradient training of **gate types** on a fixed hierarchical wiring |
 | `train-nand` | **Current best**: NAND-only wiring search |
 | `eval` | BER / colour metrics on train/val/test |
 | `render` | PNG of original / binarized / reconstruction |
 | `baselines` | Zero, majority, top-K, greedy GF(2) |
+| `simplify` | Exact post-pass on a model: constant folding, CSE, dead-gate removal (`--verify`, `--verify-random`) |
 | `export` | Copy a model into `web/public/models/` |
 | `export-samples` | 32×32 RGB previews for the demo gallery |
 
@@ -171,8 +178,10 @@ cargo run --release -p xorae -- export \
   work — see below); a soft `a(1-a)` penalty pulls them to 0/1.
 - Batch is split across rayon workers with **global** normalisation, so the
   split is mathematically exact.
-- After training: greedy wire-swap polish (optional, default 2 sweeps) and
-  dead-gate pruning.
+- After training: greedy wire-swap polish (optional, default 2 sweeps), then
+  exact simplification (`Circuit::simplify`): constant folding, hash-consing
+  CSE and dead-gate removal. Every rewrite is a Boolean identity, so BER is
+  unchanged bit for bit — verified against the full dataset.
 - The wire logits of the best-val epoch are snapshotted every `val_every`
   epochs and restored before polish/export. Selection is on val only, so test
   stays clean; at `gain_end = 32` this recovers ~0.002 val that the anneal
@@ -200,15 +209,21 @@ Do not spend time re-running these.
 
 ## Open threads, in priority order
 
-1. **Colour is encoding-limited, not model-limited.** RGB1 thresholds each
-   channel at 128, so every pixel snaps to one of 8 fully saturated colours;
-   muted browns and greys cannot be represented at all. The fix is 2 bits per
-   channel (64 colours): 16×16 × 6 bits = 1,536 bits. This needs a
-   `bits_per_pixel = 2` path through preprocessing, the trainer and the UI.
-2. **Gate removal for size.** Pruning dead gates is free. Removing *active*
-   gates with a tolerance gives a size-vs-BER frontier, which is arguably the
-   more interesting "tiny circuit" result. Nothing has been tried here yet.
-3. **Seed-averaged reporting for everything else.** The default config now has
+1. **Colour, 2 bits/channel: done, not yet shipped to the demo.** `--rgb2`
+   gives 64 colours as six bit planes (1,536 bits, 192-bit key, 8×). Over six
+   paired seeds it cuts absolute reconstruction error by 33.7% for 1.91× the
+   gates. Not in `web/public/models/` yet: the wasm bundle needs rebuilding for
+   the new `rgb2` mode before the browser can load such a model.
+2. **Gate removal for size.** Exact simplification (below) is done; the
+   lossy frontier is not. Removing *active* gates with a tolerance gives a
+   size-vs-BER curve, starting from 1,547 rather than 2,165. Nothing tried yet.
+3. **Inversions are 42% of the budget.** In the shipped model 907 of 2,165
+   reachable gates are `Nand(x, x)` (i.e. `NOT x`), and only 627 of those are
+   distinct wires. A trainer that lets a gate consume an inverted wire for free
+   (AIG-style) would spend its gate budget on real logic instead of negation —
+   plausibly the largest remaining win, but it touches the model format, the
+   evaluator and the exporter.
+4. **Seed-averaged reporting for everything else.** The default config now has
    five seeds (0.1730 ± 0.0066) and runs are deterministic, so the harness is
    established. Re-measure the colour and wide configs the same way (5 seeds,
    paired) rather than as single runs — otherwise they repeat the `gain_end`
@@ -222,6 +237,14 @@ Do not spend time re-running these.
   invalidated by the bug.
 - Dataset cache format is `XAE4` (magic `XAE4`). `XAE2`/`XAE3` still load.
 - `web/src/wasm/pkg` is generated: run `scripts/build-wasm.sh` or `npm run build`.
+  It must be rebuilt after touching `ColorMode` (an old bundle cannot parse a
+  model whose `color_mode` it does not know).
+- **Colour metrics:** judge colour models by `eval`'s *abs MAE vs original*.
+  Bit BER double-counts rgb2's extra planes, and MAE against the quantised
+  target compares across incomparable palettes. Quantisation floors here are
+  0.287 for 1 bit/channel and 0.083 for 2 bits/channel.
+- **Gate counts:** report literal NAND gates and AIG nodes separately; see the
+  note under "Current best model".
 - Solid is pinned to `2.0.0-rc.19` and uses `onSettled` (not `onMount`).
 - Headless Chrome needs `--virtual-time-budget=40000`; 20 s is too short for
   image decode.

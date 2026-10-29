@@ -368,9 +368,36 @@ impl Circuit {
         let c0 = self.n_inputs;
         let c1 = self.n_inputs + 1;
         let is_const = |w: u16| w == c0 || w == c1;
+        // Only reachable gates count; an unpruned model would otherwise report
+        // a misleadingly large number.
+        let gate_start = self.gate_start();
+        let total = self.total_wires();
+        let mut active = vec![false; total];
+        let mut stack = self.outputs.clone();
+        while let Some(wire) = stack.pop() {
+            let wire = wire as usize;
+            if wire >= total || active[wire] {
+                continue;
+            }
+            active[wire] = true;
+            if wire >= gate_start {
+                let gate = &self.gates[wire - gate_start];
+                stack.push(gate.a);
+                if !gate.op.is_unary() {
+                    stack.push(gate.b);
+                }
+            }
+        }
         self.gates
             .iter()
-            .filter(|g| !g.op.is_unary() && !is_const(g.a) && !is_const(g.b) && g.a != g.b)
+            .enumerate()
+            .filter(|&(i, g)| {
+                active[gate_start + i]
+                    && !g.op.is_unary()
+                    && !is_const(g.a)
+                    && !is_const(g.b)
+                    && g.a != g.b
+            })
             .count()
     }
 
@@ -382,7 +409,7 @@ impl Circuit {
     /// not merely for the training set. The datapath is untouched: same
     /// `n_inputs`, same output order, same wire convention.
     pub fn simplify(&self) -> (Circuit, SimplifyStats) {
-        let n_in = self.n_inputs as u16;
+        let n_in = self.n_inputs;
         // Wire convention: inputs are `0..n_inputs`, `n_inputs` is the
         // constant 0 and `n_inputs + 1` is the constant 1.
         let c0 = n_in;
@@ -421,9 +448,7 @@ impl Circuit {
                         c1
                     } else if a == c1 {
                         interner.inv(b)
-                    } else if b == c1 {
-                        interner.inv(a)
-                    } else if a == b {
+                    } else if b == c1 || a == b {
                         interner.inv(a)
                     } else {
                         interner.node(Op::Nand, a, b)
@@ -434,9 +459,7 @@ impl Circuit {
                         c0
                     } else if a == c1 {
                         b
-                    } else if b == c1 {
-                        a
-                    } else if a == b {
+                    } else if b == c1 || a == b {
                         a
                     } else {
                         interner.node(Op::And, a, b)
@@ -447,9 +470,7 @@ impl Circuit {
                         c1
                     } else if a == c0 {
                         b
-                    } else if b == c0 {
-                        a
-                    } else if a == b {
+                    } else if b == c0 || a == b {
                         a
                     } else {
                         interner.node(Op::Or, a, b)

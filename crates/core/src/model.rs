@@ -109,8 +109,8 @@ impl Model {
             return Err(format!("bits_per_pixel must be in 1..=8, got {bpp}"));
         }
         let channels = self.config.channels.max(1);
-        if channels > 4 {
-            return Err(format!("channels must be in 1..=4, got {channels}"));
+        if channels > 6 {
+            return Err(format!("channels must be in 1..=6, got {channels}"));
         }
         let input_bits = pixels
             .checked_mul(channels)
@@ -138,6 +138,11 @@ impl Model {
             ColorMode::Rgb1 => {
                 if bpp != 1 || channels != 3 {
                     return Err("rgb1 models must use 3 channels and bits_per_pixel = 1".into());
+                }
+            }
+            ColorMode::Rgb2 => {
+                if bpp != 1 || channels != 6 {
+                    return Err("rgb2 models must use 6 channels and bits_per_pixel = 1".into());
                 }
             }
         }
@@ -241,6 +246,25 @@ impl Model {
                     let g = bits.get(pixels + p).copied().unwrap_or(0) & 1;
                     let b = bits.get(2 * pixels + p).copied().unwrap_or(0) & 1;
                     rgb.extend_from_slice(&[r * 255, g * 255, b * 255]);
+                }
+                rgb
+            }
+            ColorMode::Rgb2 => {
+                // Six planes: two per channel, high bit first.
+                let pixels = self.config.image_size * self.config.image_size;
+                let mut rgb = Vec::with_capacity(pixels * 3);
+                for p in 0..pixels {
+                    let mut pixel = [0u8; 3];
+                    for (channel, slot) in pixel.iter_mut().enumerate() {
+                        let hi = bits.get((2 * channel) * pixels + p).copied().unwrap_or(0) & 1;
+                        let lo = bits
+                            .get((2 * channel + 1) * pixels + p)
+                            .copied()
+                            .unwrap_or(0)
+                            & 1;
+                        *slot = ((hi << 1) | lo) * 85;
+                    }
+                    rgb.extend_from_slice(&pixel);
                 }
                 rgb
             }
@@ -400,5 +424,49 @@ mod tests {
         assert_eq!(key, vec![0, 1]);
         assert_eq!(recon, vec![0, 1]);
         assert_eq!(model.decode_rgb(&key).unwrap(), vec![0, 255, 0]);
+    }
+
+    #[test]
+    fn rgb2_model_decodes_two_bits_per_channel() {
+        // 1x1 image: six planes R_hi, R_lo, G_hi, G_lo, B_hi, B_lo.
+        let encoder = Circuit {
+            n_inputs: 6,
+            gates: vec![],
+            outputs: (0..6).collect(),
+        };
+        let decoder = Circuit {
+            n_inputs: 6,
+            gates: vec![],
+            outputs: (0..6).collect(),
+        };
+        let model = Model::new(
+            ModelConfig {
+                image_size: 1,
+                key_bits: 6,
+                gate_set: GateSet::XorOnly,
+                binarize: BinarizeMode::Threshold,
+                threshold: 128,
+                seed: 1,
+                color_mode: ColorMode::Rgb2,
+                palette: vec![],
+                bits_per_pixel: 1,
+                channels: 6,
+            },
+            encoder,
+            decoder,
+            ModelMetrics::default(),
+        );
+        model.validate().unwrap();
+        // R = 3 (255), G = 1 (85), B = 0.
+        let bits = [1, 1, 0, 1, 0, 0];
+        assert_eq!(model.bits_to_rgb(&bits), vec![255, 85, 0]);
+        assert_eq!(model.decode_rgb(&bits).unwrap(), vec![255, 85, 0]);
+    }
+
+    #[test]
+    fn rgb2_requires_six_channels() {
+        let mut model = tiny_model();
+        model.config.color_mode = ColorMode::Rgb2;
+        assert!(model.validate().unwrap_err().contains("6 channels"));
     }
 }

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use xorae::dataset::{load_cifar10, Dataset, CIFAR_RECORD};
+use xorae::dataset::{load_cifar10, load_cifar10_rgb2, Dataset, CIFAR_RECORD};
 use xorae_core::preprocess::{BinarizeMode, PreprocessOptions};
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -116,6 +116,49 @@ fn dataset_roundtrips_through_disk() {
     assert_eq!(loaded.is_test, dataset.is_test);
     assert_eq!(loaded.gray, dataset.gray);
     assert_eq!(loaded.bits, dataset.bits);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Build a one-image CIFAR batch whose channels are constant.
+fn write_constant_cat(dir: &Path, rgb: [u8; 3]) {
+    let mut record = vec![3u8];
+    for channel in rgb {
+        record.extend(std::iter::repeat_n(channel, 32 * 32));
+    }
+    std::fs::write(dir.join("data_batch_1.bin"), record).unwrap();
+    std::fs::write(dir.join("test_batch.bin"), []).unwrap();
+    write_empty_batches(dir);
+}
+
+#[test]
+fn rgb2_loader_quantises_channels_into_six_planes() {
+    let dir = temp_dir("rgb2");
+    // R = 255 -> level 3 (hi and lo), G = 128 -> level 2 (hi only),
+    // B = 0 -> level 0 (neither).
+    write_constant_cat(&dir, [255, 128, 0]);
+
+    let dataset = load_cifar10_rgb2(&dir, 3, 2).unwrap();
+    assert_eq!(dataset.channels, 6);
+    assert_eq!(dataset.bits_per_pixel, 1);
+    assert_eq!(dataset.cols(), 4 * 6);
+
+    let bits = dataset.row_bits(0);
+    assert_eq!(bits.len(), 24);
+    assert!(bits[0..4].iter().all(|&b| b == 1), "R_hi");
+    assert!(bits[4..8].iter().all(|&b| b == 1), "R_lo");
+    assert!(bits[8..12].iter().all(|&b| b == 1), "G_hi");
+    assert!(bits[12..16].iter().all(|&b| b == 0), "G_lo");
+    assert!(bits[16..24].iter().all(|&b| b == 0), "B_hi/B_lo");
+
+    // The dataset cache must preserve the mode, channel count and bits.
+    let path = dir.join("rgb2.bin");
+    dataset.save(&path).unwrap();
+    let loaded = Dataset::load(&path).unwrap();
+    assert_eq!(loaded.color_mode, dataset.color_mode);
+    assert_eq!(loaded.channels, 6);
+    assert_eq!(loaded.bits_per_pixel, 1);
+    assert_eq!(loaded.row_bits(0), bits);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
