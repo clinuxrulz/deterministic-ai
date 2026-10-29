@@ -107,6 +107,11 @@ enum CliCommand {
         data: Option<PathBuf>,
         #[arg(long)]
         toy: bool,
+        /// Export 32×32 RGB previews directly from the CIFAR test batch.
+        #[arg(long)]
+        cifar_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = 3)]
+        class: u8,
         #[arg(long, default_value = "web/public")]
         out: PathBuf,
         #[arg(long, default_value_t = 8)]
@@ -262,16 +267,28 @@ fn main() -> Result<()> {
         CliCommand::ExportSamples {
             data,
             toy,
+            cifar_dir,
+            class,
             out,
             count,
             scale,
             seed,
             prefix,
         } => {
+            if let Some(cifar_dir) = cifar_dir {
+                render::export_cifar_samples(&cifar_dir, class, &out, count, scale, &prefix)?;
+                println!(
+                    "wrote {} CIFAR previews to {}",
+                    count,
+                    out.join("samples").display()
+                );
+                return Ok(());
+            }
             let dataset = if toy {
                 toy::linear_subspace(8, 4, seed)?
             } else {
-                let path = data.context("--data is required unless --toy is used")?;
+                let path =
+                    data.context("--data is required unless --toy or --cifar-dir is used")?;
                 Dataset::load(&path)?
             };
             let (_train, val, test) = dataset.split_indices(seed);

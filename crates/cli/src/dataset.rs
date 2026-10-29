@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use xorae_core::bits::BitMatrix;
-use xorae_core::preprocess::{binarize, resize_box, rgb_to_gray, PreprocessOptions};
+use xorae_core::preprocess::{binarize, resize_box, PreprocessOptions};
 
 pub const CIFAR_RECORD: usize = 1 + 32 * 32 * 3;
 pub const CIFAR_CLASS_CAT: u8 = 3;
@@ -225,8 +225,10 @@ pub fn load_cifar10(dir: &Path, class: u8, opts: PreprocessOptions) -> Result<Da
             if label != class {
                 continue;
             }
-            let rgb = &record[1..];
-            let gray32 = rgb_to_gray(32, 32, rgb);
+            let pixels = &record[1..];
+            let (red, rest) = pixels.split_at(32 * 32);
+            let (green, blue) = rest.split_at(32 * 32);
+            let gray32 = planar_rgb_to_gray(red, green, blue);
             let small = resize_box(&gray32, 32, 32, opts.size);
             let bits = binarize(&small, opts.mode, opts.threshold);
             rows.push(bits);
@@ -246,4 +248,18 @@ pub fn load_cifar10(dir: &Path, class: u8, opts: PreprocessOptions) -> Result<Da
         is_test,
         SplitMode::Hash,
     ))
+}
+
+/// CIFAR binary records store channels plane-by-plane: 1024 red bytes, then
+/// 1024 green, then 1024 blue. This is *not* interleaved RGB.
+fn planar_rgb_to_gray(red: &[u8], green: &[u8], blue: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(red.len(), green.len());
+    debug_assert_eq!(red.len(), blue.len());
+    red.iter()
+        .zip(green.iter())
+        .zip(blue.iter())
+        .map(|((&r, &g), &b)| {
+            ((299 * r as u32 + 587 * g as u32 + 114 * b as u32) / 1000).min(255) as u8
+        })
+        .collect()
 }

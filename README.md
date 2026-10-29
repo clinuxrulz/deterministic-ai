@@ -151,20 +151,30 @@ The static site is written to `web/dist/`. The build script is
 `scripts/build-wasm.sh`; it outputs the generated JS/TS/WASM package to
 `web/src/wasm/pkg/` (gitignored).
 
-The app loads the bundled toy model and 8 toy samples. To add trained cat models:
+The app loads the **threshold cat model** and **8 cat previews** by default. The
+dither, strict-XOR, and toy models remain selectable. To regenerate the demo
+assets:
 
 ```bash
 cargo run -p xorae -- export \
-  --model runs/cats16-xor-and/model.json \
-  --out web/public/models/cats16-xor-and.json
+  --model runs/cats16-xor-and-threshold/model.json \
+  --out web/public/models/cats16-threshold.json
 
 cargo run -p xorae -- export-samples \
-  --data data/cats16.bin --out web/public \
-  --count 8 --prefix cat
+  --cifar-dir data/cifar-10-batches-bin --class 3 \
+  --out web/public --count 8 --scale 8 --prefix cat
 ```
+
+The `export-samples` command writes 32×32 RGB previews when `--cifar-dir` is
+provided. Use `--data data/cats16.bin` instead to export 16×16 grayscale
+previews from a cached dataset.
 
 The manifest is `web/public/models/index.json`. Solid is pinned to
 `2.0.0-rc.19`; the app uses the client-only Vite mode (no SSR).
+
+The gallery previews the **32×32 RGB source image**. The model still receives
+the **16×16 binarized input** shown in the bit grid; the preview is only for
+recognizability.
 
 ## Commands
 
@@ -176,7 +186,7 @@ The manifest is `web/public/models/index.json`. Solid is pinned to
 | `eval` | Report BER, exact-match rate, key entropy, active gates |
 | `render` | Write a PNG grid: original / binarized / reconstruction |
 | `export` | Write the portable model JSON |
-| `export-samples` | Write sample PNGs + `samples/index.json` for the web app |
+| `export-samples` | Write sample PNGs + `samples/index.json` (`--cifar-dir` for 32×32 RGB previews) |
 | `baselines` | All-zero, per-bit majority, top-K identity, greedy GF(2) basis |
 
 ## How the model works
@@ -266,24 +276,29 @@ CIFAR-10 cats, 16×16, 32-bit key, 512-image training batch, seed 42, 3,000
 generations. Train BER is on the 512-image training batch; validation and test
 BER are on the full 1,001 / 1,000 image splits.
 
-Dither baselines for the original 1-bit representation:
+> **Correction:** earlier results in this repository were invalid because the
+> CIFAR loader read CIFAR's planar channel layout as interleaved RGB. The loader
+> is fixed in `crates/cli/src/dataset.rs`; every number below comes from the
+> corrected datasets.
+
+Dither baselines for the 1-bit dithered representation:
 
 | Baseline | Test BER |
 |---|---:|
-| All-zero | 0.4483 |
-| Per-bit majority | 0.4464 |
-| Top-K identity | 0.4440 |
-| Greedy GF(2) basis | **0.4358** |
+| All-zero | 0.4567 |
+| Per-bit majority | 0.4568 |
+| Top-K identity | 0.4570 |
+| Greedy GF(2) basis | **0.4325** |
 
 | Run | Encoding | Key | Train BER | Val BER | Test BER | Notes |
 |---|---|---:|---:|---:|---:|---|
 | Toy 8×8 strict XOR | 1-bit threshold | 4 bits | 0.0000 | 0.0000 | 0.0000 (11/11 exact) | 128+128 gates |
-| CIFAR strict XOR | dither | 32 bits | 0.4180 | 0.4448 | 0.4477 | 380 active gates; does not reach the greedy linear basis |
-| CIFAR XOR+AND | dither | 32 bits | 0.3927 | 0.4191 | 0.4214 | 347 active gates; beats the linear baseline by ~1.4 points |
-| CIFAR XOR+AND | threshold | 32 bits | 0.2126 | 0.2117 | **0.2134** | 292 active gates; 0.70% exact; same config, only preprocessing changed |
+| CIFAR strict XOR | dither | 32 bits | 0.4402 | 0.4826 | 0.4811 | 432 active gates; does not reach the greedy linear basis |
+| CIFAR XOR+AND | dither | 32 bits | 0.4086 | 0.4412 | 0.4418 | 368 active gates; slightly worse than the greedy basis |
+| CIFAR XOR+AND | threshold | 32 bits | 0.2236 | 0.2241 | **0.2285** | 283 active gates; 0.30% exact; best result |
 
-The **threshold XOR+AND model** is the current web demo model (test BER
-0.2134). The dither run remains selectable as a control.
+The **threshold XOR+AND model** is the current web demo model. The dither run
+and strict-XOR model remain selectable as controls.
 
 ### Binarization ablation
 
@@ -292,17 +307,16 @@ preprocessing has a large effect:
 
 | Binarization | Test BER | Exact match | Active gates |
 |---|---:|---:|---:|
-| Floyd–Steinberg dither | 0.4214 | 0.00% | 347 |
-| Threshold | **0.2134** | 0.70% | 292 |
+| Floyd–Steinberg dither | 0.4418 | 0.00% | 368 |
+| Threshold | **0.2285** | 0.30% | 283 |
 | Otsu | not trained | — | — |
 
-Threshold baselines are also stronger than dither baselines: all-zero `0.3967`,
-per-bit majority `0.3948`, top-K identity `0.3871`, greedy GF(2) basis `0.4074`.
-The threshold model at `0.2134` is well below all of them, so the gain is not
-just a change in bit density.
+Threshold baselines: all-zero `0.4188`, per-bit majority `0.4188`, top-K identity
+`0.4167`, greedy GF(2) basis `0.3731`. The threshold model at `0.2285` beats the
+strongest threshold baseline by about 14 BER points.
 
 **Current observation:** the representation matters more than the gate set right
-now. Dithering encodes intensity as high-frequency noise that a ~292-active-gate
+now. Dithering encodes intensity as high-frequency noise that a ~283-active-gate
 circuit cannot reconstruct. Thresholding produces simpler, more structured
 images and roughly halves the test BER. This motivates the next experiment:
 quantized value encodings (Gray or thermometer) with a larger key, so the model

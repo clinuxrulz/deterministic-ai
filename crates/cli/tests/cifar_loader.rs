@@ -64,6 +64,37 @@ fn cifar_loader_filters_class_and_preserves_split() {
 }
 
 #[test]
+fn cifar_loader_uses_planar_channel_order() {
+    let dir = temp_dir("planar");
+    let mut record = Vec::with_capacity(CIFAR_RECORD);
+    record.push(3); // cat
+    record.extend(std::iter::repeat_n(255u8, 32 * 32)); // red plane
+    record.extend(std::iter::repeat_n(0u8, 32 * 32)); // green plane
+    record.extend(std::iter::repeat_n(0u8, 32 * 32)); // blue plane
+    std::fs::write(dir.join("data_batch_1.bin"), record).unwrap();
+    write_empty_batches(&dir);
+    std::fs::write(dir.join("test_batch.bin"), []).unwrap();
+
+    let opts = PreprocessOptions {
+        size: 8,
+        mode: BinarizeMode::Threshold,
+        threshold: 128,
+    };
+    let dataset = load_cifar10(&dir, 3, opts).unwrap();
+    assert_eq!(dataset.n, 1);
+    // Luma of pure red is 0.299 * 255 = 76. Interpreting the planes as
+    // interleaved RGB would produce mostly 255 here.
+    assert!(
+        dataset.row_gray(0).iter().all(|&value| value == 76),
+        "expected planar red luma 76, got {:?}",
+        &dataset.row_gray(0)[..8]
+    );
+    assert!(dataset.row_bits(0).iter().all(|&bit| bit == 0));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn dataset_roundtrips_through_disk() {
     let dir = temp_dir("roundtrip");
     write_batch(&dir.join("data_batch_1.bin"), &[(3, 255), (3, 0)]);

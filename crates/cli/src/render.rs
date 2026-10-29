@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use image::{Rgb, RgbImage};
 use xorae_core::Model;
 
-use crate::dataset::Dataset;
+use crate::dataset::{Dataset, CIFAR_RECORD};
 
 const GAP: u32 = 6;
 const BACKGROUND: Rgb<u8> = Rgb([22, 24, 29]);
@@ -157,6 +157,79 @@ pub fn export_samples(
                 fill_block(&mut image, x as u32 * scale, y as u32 * scale, scale, color);
             }
         }
+        let name = format!("{prefix}-{i:02}.png");
+        image
+            .save(dir.join(&name))
+            .with_context(|| format!("writing sample {name}"))?;
+        entries.push(serde_json::json!({
+            "name": format!("{prefix} {i}"),
+            "path": format!("samples/{name}"),
+        }));
+    }
+
+    let manifest = serde_json::json!({ "samples": entries });
+    std::fs::write(
+        asset_root.join("samples/index.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+    Ok(())
+}
+
+/// Export 32×32 RGB previews straight from CIFAR's test batch.
+///
+/// The model still receives a 16×16 binarized image; the preview simply shows
+/// the source photo at its native resolution so the demo input is recognizable.
+pub fn export_cifar_samples(
+    cifar_dir: &Path,
+    class: u8,
+    asset_root: &Path,
+    count: usize,
+    scale: u32,
+    prefix: &str,
+) -> Result<()> {
+    let path = cifar_dir.join("test_batch.bin");
+    let data = std::fs::read(&path)
+        .with_context(|| format!("reading CIFAR test batch {}", path.display()))?;
+    if data.len() % CIFAR_RECORD != 0 {
+        bail!(
+            "{} has length {}, which is not a multiple of {}",
+            path.display(),
+            data.len(),
+            CIFAR_RECORD
+        );
+    }
+
+    let offsets: Vec<usize> = data
+        .chunks_exact(CIFAR_RECORD)
+        .enumerate()
+        .filter_map(|(i, record)| (record[0] == class).then_some(i))
+        .collect();
+    if offsets.is_empty() {
+        bail!("no class {class} images in {}", path.display());
+    }
+
+    let dir = asset_root.join("samples");
+    std::fs::create_dir_all(&dir)?;
+    let count = count.min(offsets.len());
+    let mut entries = Vec::with_capacity(count);
+
+    for i in 0..count {
+        let record_index = offsets[i * offsets.len() / count];
+        let record = &data[record_index * CIFAR_RECORD..(record_index + 1) * CIFAR_RECORD];
+        let pixels = &record[1..];
+        let (red, rest) = pixels.split_at(32 * 32);
+        let (green, blue) = rest.split_at(32 * 32);
+
+        let tile = 32 * scale;
+        let mut image = RgbImage::new(tile, tile);
+        for y in 0..32u32 {
+            for x in 0..32u32 {
+                let pixel = (y * 32 + x) as usize;
+                let color = Rgb([red[pixel], green[pixel], blue[pixel]]);
+                fill_block(&mut image, x * scale, y * scale, scale, color);
+            }
+        }
+
         let name = format!("{prefix}-{i:02}.png");
         image
             .save(dir.join(&name))

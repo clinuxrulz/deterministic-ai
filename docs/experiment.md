@@ -111,18 +111,20 @@ of the current implementation.
 
 - Toy 8×8, 4-bit key, strict XOR: 0 BER, 11/11 held-out patterns exact.
 - CIFAR-10 cats, 16×16, 32-bit key, 3,000 generations, seed 42:
-  - Best linear baseline (greedy GF(2) basis, dither): **0.4358** test BER.
-  - Strict XOR, dither: **0.4477** test BER (0.4448 val); 380 active gates.
-  - XOR+AND, dither: **0.4214** test BER (0.4191 val); 347 active gates.
-  - XOR+AND, threshold: **0.2134** test BER (0.2117 val); 292 active gates;
-    0.70% exact matches. Same config, only preprocessing changed.
+  - Dither baselines: greedy GF(2) basis **0.4325** test BER.
+  - Threshold baselines: greedy GF(2) basis **0.3731** test BER.
+  - Strict XOR, dither: **0.4811** test BER (0.4826 val); 432 active gates.
+  - XOR+AND, dither: **0.4418** test BER (0.4412 val); 368 active gates.
+  - XOR+AND, threshold: **0.2285** test BER (0.2241 val); 283 active gates;
+    0.30% exact matches. Same config, only preprocessing changed.
+- **Correction:** earlier results were invalid because the CIFAR loader read the
+  planar channel layout as interleaved RGB. The loader is fixed; all numbers
+  above use corrected datasets.
 - Binarization is currently the largest lever: threshold roughly halves the
   dither test BER. The threshold model also beats the strongest threshold
-  baseline (top-K identity, 0.3871), so the gain is not just bit density.
-  Otsu has not been trained yet.
-- The XOR+AND circuit beats the best linear code by about 1.4 BER points on
-  dither. The strict-XOR GA lands above the greedy basis, which is consistent
-  with both the linearity barrier and the limits of GA search on this objective.
+  baseline by about 14 BER points. Otsu has not been trained yet.
+- The strict-XOR GA lands above the greedy basis, which is consistent with both
+  the linearity barrier and the limits of GA search on this objective.
 - Reconstructions are coarse at 16×16 with a 32-bit key. See
   `runs/cats16-xor-and/recon.png`, `runs/cats16-xor-and-threshold/recon.png`,
   and the Solid demo in `web/`.
