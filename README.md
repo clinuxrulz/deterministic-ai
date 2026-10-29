@@ -1,15 +1,37 @@
 # deterministic-ai
 
-Evolve **XOR-gate autoencoders** with a genetic algorithm.
+Boolean-circuit autoencoders for images.
 
 The encoder squishes a binarized image into a short **key**; the decoder rebuilds
-the image from that key alone. The model is a wired Boolean circuit, not a neural
-network. There are no gradients and no floating-point weights — the wiring is
-evolved by a CGP-style genetic algorithm.
+the image from that key alone. Inference is a wired circuit of literal 2-input
+logic gates — no floating-point weights.
 
 ```
-image bits ──▶ encoder (XOR/AND gates) ──▶ K-bit key ──▶ decoder (XOR/AND gates) ──▶ reconstruction
+image bits ──▶ encoder (gates) ──▶ K-bit key ──▶ decoder (gates) ──▶ reconstruction
 ```
+
+## Current best
+
+A **NAND-only** circuit: every gate is identical, so the circuit is fully
+described by its wiring, and the wiring is found with gradients over a softmax
+over candidate wires.
+
+| Field | Value |
+|---|---|
+| Gates | 2,165 after pruning (2,688 trained) |
+| Key | 128 bits |
+| Input | 32×32 grayscale (1,024 bits) |
+| Compression | 8× |
+| Test BER | **0.1727** |
+
+Baseline: the genetic algorithm reached test BER 0.2097 with 4,096 XOR+AND
+gates. See `AGENTS.md` for the full handoff, `docs/experiment.md` for the log,
+and `configs/cats32_nand.toml` for the training config.
+
+> **Historical note.** This project started as an "evolve XOR gates with a GA"
+> experiment. That track is preserved (`train`, `configs/cats16_*.toml`) and is
+> what the linearity analysis below refers to, but gradient-trained gate types
+> only reached BER 0.2523 while the NAND wiring search reached 0.1727.
 
 ## Read this first: XOR is linear over GF(2)
 
@@ -37,7 +59,13 @@ proof and the implications.
   evaluator, image preprocessing, and the portable model JSON format. No
   `rayon`, filesystem, or image-decoding dependencies.
 - **`crates/cli` (`xorae`)** — CIFAR-10 loader, toy linear-subspace generator,
-  genetic algorithm, baselines, rendering, and model/sample export.
+  three trainers (genetic algorithm, gradient gate types, and the NAND wiring
+  search), baselines, rendering, and model/sample export.
+  - `train` — CGP-style genetic algorithm over circuits.
+  - `train-grad` — gradient training of gate *types* on a fixed hierarchical
+    wiring (test BER 0.2523; useful as a control).
+  - `train-nand` — **current best**: every gate is NAND, so only the wiring is
+    learned, by gradients over a softmax over candidate wires (test BER 0.1727).
 - **`crates/wasm` (`xorae-wasm`)** — a small `wasm-bindgen` bridge over
   `xorae-core`: model parsing, image preprocessing, encode and decode.
 - **`web/`** — Solid 2.0 + Vite single-page demo: upload an image or pick a
@@ -151,9 +179,9 @@ The static site is written to `web/dist/`. The build script is
 `scripts/build-wasm.sh`; it outputs the generated JS/TS/WASM package to
 `web/src/wasm/pkg/` (gitignored).
 
-The app loads the **threshold cat model** and **8 cat previews** by default. The
-dither, strict-XOR, and toy models remain selectable. To regenerate the demo
-assets:
+The app loads the **NAND-only 32×32 model** (the current best) and **8 cat
+previews** by default. The RGB1 colour model, threshold, dither, strict-XOR and
+toy models remain selectable. To regenerate the demo assets:
 
 ```bash
 cargo run -p xorae -- export \
