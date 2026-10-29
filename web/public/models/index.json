@@ -4,7 +4,7 @@
       "id": "cats32-nand",
       "name": "CIFAR cats 32×32 · NAND-only (best)",
       "path": "models/cats32-nand.json",
-      "description": "Best grayscale: 2,165 NAND gates, 128-bit key, 8x compression, test BER 17.27%."
+      "description": "Best grayscale: 1,547 NAND gates after exact simplification (2,688 trained), 128-bit key, 8x compression, test BER 17.27%."
     },
     {
       "id": "cats16-rgb1",

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Primitive Boolean operations available to a circuit.
@@ -354,6 +356,260 @@ impl Circuit {
     pub fn is_xor_only(&self) -> bool {
         self.gates.iter().all(|g| matches!(g.op, Op::Xor))
     }
+
+    /// Number of gates that would remain if inversions were free.
+    ///
+    /// In an AND-Inverter Graph a complemented edge costs nothing, so gates
+    /// that only negate one wire (`Not`, `Nand(x, x)`, `Nand(x, 1)`) collapse
+    /// into their consumers. This counts the gates that survive that view —
+    /// it is a size metric, not a gate count, and is reported alongside
+    /// `active_gates` so the two are never conflated.
+    pub fn aig_nodes(&self) -> usize {
+        let c0 = self.n_inputs;
+        let c1 = self.n_inputs + 1;
+        let is_const = |w: u16| w == c0 || w == c1;
+        self.gates
+            .iter()
+            .filter(|g| !g.op.is_unary() && !is_const(g.a) && !is_const(g.b) && g.a != g.b)
+            .count()
+    }
+
+    /// Exact simplification: constant folding, hash-consing (CSE) and
+    /// dead-gate removal.
+    ///
+    /// Every rewrite applied here is a Boolean identity, so the result
+    /// computes the *same function* as the original for every possible input,
+    /// not merely for the training set. The datapath is untouched: same
+    /// `n_inputs`, same output order, same wire convention.
+    pub fn simplify(&self) -> (Circuit, SimplifyStats) {
+        let n_in = self.n_inputs as u16;
+        // Wire convention: inputs are `0..n_inputs`, `n_inputs` is the
+        // constant 0 and `n_inputs + 1` is the constant 1.
+        let c0 = n_in;
+        let c1 = n_in + 1;
+        let total = self.total_wires();
+
+        let mut map = vec![u16::MAX; total];
+        let n_inputs = self.n_inputs as usize;
+        for (i, slot) in map.iter_mut().take(n_inputs).enumerate() {
+            *slot = i as u16;
+        }
+        map[n_inputs] = c0;
+        map[n_inputs + 1] = c1;
+
+        let mut interner = Interner {
+            n_in,
+            xor_only: self.is_xor_only(),
+            gates: Vec::with_capacity(self.gates.len()),
+            seen: HashMap::new(),
+            deduped: 0,
+        };
+        let mut stats = SimplifyStats {
+            gates_before: self.gates.len(),
+            ..Default::default()
+        };
+
+        for (i, gate) in self.gates.iter().enumerate() {
+            let a = map[gate.a as usize];
+            let b = map[gate.b as usize];
+            debug_assert!(a != u16::MAX && b != u16::MAX);
+
+            let out = match gate.op {
+                Op::Not => interner.inv(a),
+                Op::Nand => {
+                    if a == c0 || b == c0 {
+                        c1
+                    } else if a == c1 {
+                        interner.inv(b)
+                    } else if b == c1 {
+                        interner.inv(a)
+                    } else if a == b {
+                        interner.inv(a)
+                    } else {
+                        interner.node(Op::Nand, a, b)
+                    }
+                }
+                Op::And => {
+                    if a == c0 || b == c0 {
+                        c0
+                    } else if a == c1 {
+                        b
+                    } else if b == c1 {
+                        a
+                    } else if a == b {
+                        a
+                    } else {
+                        interner.node(Op::And, a, b)
+                    }
+                }
+                Op::Or => {
+                    if a == c1 || b == c1 {
+                        c1
+                    } else if a == c0 {
+                        b
+                    } else if b == c0 {
+                        a
+                    } else if a == b {
+                        a
+                    } else {
+                        interner.node(Op::Or, a, b)
+                    }
+                }
+                Op::Nor => {
+                    if a == c1 || b == c1 {
+                        c0
+                    } else if a == c0 || b == c0 {
+                        interner.inv(if a == c0 { b } else { a })
+                    } else if a == b {
+                        interner.inv(a)
+                    } else {
+                        interner.node(Op::Nor, a, b)
+                    }
+                }
+                Op::Xor => {
+                    if a == c0 {
+                        b
+                    } else if b == c0 {
+                        a
+                    } else if a == c1 {
+                        interner.inv(b)
+                    } else if b == c1 {
+                        interner.inv(a)
+                    } else if a == b {
+                        c0
+                    } else {
+                        interner.node(Op::Xor, a, b)
+                    }
+                }
+                Op::Xnor => {
+                    if a == c0 || b == c0 {
+                        interner.inv(if a == c0 { b } else { a })
+                    } else if a == c1 {
+                        b
+                    } else if b == c1 {
+                        a
+                    } else if a == b {
+                        c1
+                    } else {
+                        interner.node(Op::Xnor, a, b)
+                    }
+                }
+            };
+
+            // Classify what the rewrite achieved: a constant wire means the
+            // gate folded away; reusing one of its own inputs is an identity.
+            if out == c0 || out == c1 {
+                stats.folded_const += 1;
+            } else if out == a || out == b {
+                stats.folded_identity += 1;
+            }
+
+            map[self.gate_start() + i] = out;
+        }
+
+        let outputs = self
+            .outputs
+            .iter()
+            .map(|&wire| map[wire as usize])
+            .collect::<Vec<_>>();
+        let built = Circuit {
+            n_inputs: self.n_inputs,
+            gates: interner.gates,
+            outputs,
+        };
+        let pruned = built.prune_dead();
+        stats.dead = built.gates.len() - pruned.gates.len();
+        stats.gates_after = pruned.gates.len();
+        stats.deduped = interner.deduped;
+        (pruned, stats)
+    }
+}
+
+/// Statistics from [`Circuit::simplify`], for logging and docs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimplifyStats {
+    pub gates_before: usize,
+    pub gates_after: usize,
+    /// Gates folded to the constant 0/1 wires.
+    pub folded_const: usize,
+    /// Gates replaced by an existing wire (`x AND 1`, `x XOR 0`, ...).
+    pub folded_identity: usize,
+    /// Gates merged into an identical earlier gate.
+    pub deduped: usize,
+    /// Gates dropped as unreachable after rewriting.
+    pub dead: usize,
+}
+
+/// Hash-consing helper: builds each distinct node once.
+struct Interner {
+    n_in: u16,
+    xor_only: bool,
+    gates: Vec<Gate>,
+    seen: HashMap<(u8, u16, u16), u16>,
+    deduped: usize,
+}
+
+impl Interner {
+    const INV: u8 = 0;
+
+    fn push(&mut self, key: (u8, u16, u16), gate: Gate) -> u16 {
+        if let Some(&wire) = self.seen.get(&key) {
+            self.deduped += 1;
+            return wire;
+        }
+        let wire = self.n_in + 2 + self.gates.len() as u16;
+        self.gates.push(gate);
+        self.seen.insert(key, wire);
+        wire
+    }
+
+    /// Negation of one wire. Emitted as `Nand(x, x)`, or as `Xor(x, 1)` in an
+    /// XOR-only circuit so that the affine invariant survives.
+    fn inv(&mut self, x: u16) -> u16 {
+        // NOT 0 = 1 and NOT 1 = 0.
+        if x == self.n_in {
+            return self.n_in + 1;
+        }
+        if x == self.n_in + 1 {
+            return self.n_in;
+        }
+        let key = (Self::INV, x, 0);
+        let existing = self.seen.get(&key).copied();
+        if let Some(wire) = existing {
+            self.deduped += 1;
+            return wire;
+        }
+        let gate = if self.xor_only {
+            Gate {
+                op: Op::Xor,
+                a: x,
+                b: self.n_in + 1,
+            }
+        } else {
+            Gate {
+                op: Op::Nand,
+                a: x,
+                b: x,
+            }
+        };
+        self.push(key, gate)
+    }
+
+    /// A genuine two-input gate. Inputs are already known to be distinct,
+    /// non-constant wires.
+    fn node(&mut self, op: Op, a: u16, b: u16) -> u16 {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let tag = match op {
+            Op::And => 1,
+            Op::Nand => 2,
+            Op::Or => 3,
+            Op::Nor => 4,
+            Op::Xor => 5,
+            Op::Xnor => 6,
+            Op::Not => Self::INV,
+        };
+        self.push((tag, lo, hi), Gate { op, a: lo, b: hi })
+    }
 }
 
 /// Small deterministic RNG used only for random circuit initialisation.
@@ -506,5 +762,172 @@ mod tests {
             outputs: vec![2],
         };
         assert!(circuit.validate().is_err());
+    }
+
+    /// Evaluate every gate-set generated by `circuit` on one input vector.
+    fn run(c: &Circuit, input: u64) -> Vec<u8> {
+        // One u64 plane per input wire; bit 0 carries the value.
+        let planes: Vec<u64> = (0..c.n_inputs)
+            .map(|i| u64::from((input >> i) & 1))
+            .collect();
+        let mut arena = Vec::new();
+        let mut out = Vec::new();
+        c.eval_into(&planes, 1, &mut arena, &mut out);
+        out.iter().map(|w| (w & 1) as u8).collect()
+    }
+
+    /// Exhaustively compare two circuits on all 2^n inputs (n <= 12).
+    fn assert_equivalent(a: &Circuit, b: &Circuit) {
+        assert_eq!(a.n_inputs, b.n_inputs);
+        assert_eq!(a.outputs.len(), b.outputs.len());
+        for v in 0..(1u64 << a.n_inputs) {
+            assert_eq!(run(a, v), run(b, v), "mismatch on input {v:#b}");
+        }
+    }
+
+    #[test]
+    fn simplify_is_exact_on_redundant_nand_circuit() {
+        // 3 inputs (0..=2), const 0 = wire 3, const 1 = wire 4, gates from 5.
+        // Deliberately full of redundancy: duplicate inverters, a gate fed by
+        // const 0, a duplicated two-input gate, and a dead gate.
+        let circuit = Circuit {
+            n_inputs: 3,
+            gates: vec![
+                Gate {
+                    op: Op::Nand,
+                    a: 0,
+                    b: 0,
+                }, // 5: NOT x0
+                Gate {
+                    op: Op::Nand,
+                    a: 0,
+                    b: 0,
+                }, // 6: duplicate of 5
+                Gate {
+                    op: Op::Nand,
+                    a: 1,
+                    b: 1,
+                }, // 7: NOT x1
+                Gate {
+                    op: Op::Nand,
+                    a: 5,
+                    b: 7,
+                }, // 8: NAND(NOT x0, NOT x1)
+                Gate {
+                    op: Op::Nand,
+                    a: 8,
+                    b: 8,
+                }, // 9: NOT 8
+                Gate {
+                    op: Op::Nand,
+                    a: 8,
+                    b: 8,
+                }, // 10: duplicate of 9
+                Gate {
+                    op: Op::Nand,
+                    a: 3,
+                    b: 2,
+                }, // 11: NAND(0, x2) = 1 (dead)
+                Gate {
+                    op: Op::Nand,
+                    a: 2,
+                    b: 3,
+                }, // 12: unused
+                Gate {
+                    op: Op::Nand,
+                    a: 2,
+                    b: 4,
+                }, // 13: NOT x2 (const-1 input)
+            ],
+            outputs: vec![9, 13, 5],
+        };
+        let (simple, stats) = circuit.simplify();
+        assert_equivalent(&circuit, &simple);
+        assert!(stats.gates_after < stats.gates_before);
+        // Duplicate inverters and duplicated nodes must have collapsed.
+        assert_eq!(stats.deduped, 2, "stats: {stats:?}");
+        assert_eq!(stats.folded_const, 2, "stats: {stats:?}");
+        assert_eq!(stats.gates_after, 5, "stats: {stats:?}");
+        simple.validate().unwrap();
+    }
+
+    #[test]
+    fn simplify_handles_constant_folding() {
+        // NAND(x, 0) = 1, NAND(1, 1) = 0.
+        let circuit = Circuit {
+            n_inputs: 2,
+            gates: vec![
+                Gate {
+                    op: Op::Nand,
+                    a: 0,
+                    b: 2,
+                }, // const 0 wire -> 1
+                Gate {
+                    op: Op::Nand,
+                    a: 3,
+                    b: 3,
+                }, // NAND(1, 1) -> 0
+            ],
+            outputs: vec![4, 5],
+        };
+        let (simple, stats) = circuit.simplify();
+        assert_equivalent(&circuit, &simple);
+        assert_eq!(stats.folded_const, 2);
+        assert_eq!(simple.outputs, vec![3, 2]);
+        assert!(simple.gates.is_empty(), "gates: {:?}", simple.gates);
+    }
+
+    #[test]
+    fn simplify_keeps_xor_only_circuits_affine() {
+        let c = Circuit::random(8, 32, 4, GateSet::XorOnly, 5);
+        let (simple, _) = c.simplify();
+        assert_equivalent(&c, &simple);
+        assert!(simple.is_xor_only(), "inversion leaked a non-XOR gate");
+    }
+
+    #[test]
+    fn simplify_of_random_circuits_preserves_behaviour() {
+        for (set, seed) in [
+            (GateSet::Universal, 1u64),
+            (GateSet::Full, 2),
+            (GateSet::NandOnly, 3),
+            (GateSet::XorAnd, 4),
+            (GateSet::XorOnly, 5),
+        ] {
+            let c = Circuit::random(6, 40, 5, set, seed);
+            let (simple, _) = c.simplify();
+            assert_equivalent(&c, &simple);
+            simple.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn simplify_is_idempotent() {
+        let c = Circuit::random(16, 64, 8, GateSet::NandOnly, 9);
+        let (once, _) = c.simplify();
+        let (twice, stats) = once.simplify();
+        assert_eq!(once, twice);
+        assert_eq!(stats.deduped, 0);
+    }
+
+    #[test]
+    fn aig_nodes_ignores_inverters() {
+        let circuit = Circuit {
+            n_inputs: 2,
+            gates: vec![
+                Gate {
+                    op: Op::Nand,
+                    a: 0,
+                    b: 0,
+                }, // inverter
+                Gate {
+                    op: Op::Nand,
+                    a: 0,
+                    b: 1,
+                }, // real node
+            ],
+            outputs: vec![4, 5],
+        };
+        assert_eq!(circuit.aig_nodes(), 1);
     }
 }

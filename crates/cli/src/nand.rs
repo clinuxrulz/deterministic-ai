@@ -1142,12 +1142,24 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
         decoder.validate().map_err(anyhow::Error::msg)?;
     }
     let before = encoder.gates.len() + decoder.gates.len();
-    encoder = encoder.prune_dead();
-    decoder = decoder.prune_dead();
+    // Exact simplification: constant folding, CSE and dead-gate removal. Every
+    // rewrite is a Boolean identity, so BER is unchanged bit for bit.
+    let (enc_simple, enc_stats) = encoder.simplify();
+    let (dec_simple, dec_stats) = decoder.simplify();
+    encoder = enc_simple;
+    decoder = dec_simple;
     let after = encoder.gates.len() + decoder.gates.len();
     eprintln!(
-        "pruned dead gates: {before} -> {after} ({} removed)",
-        before - after
+        "simplified: {before} -> {after} gates ({} removed; const {}, identity {}, deduped {}, dead {})",
+        before - after,
+        enc_stats.folded_const + dec_stats.folded_const,
+        enc_stats.folded_identity + dec_stats.folded_identity,
+        enc_stats.deduped + dec_stats.deduped,
+        enc_stats.dead + dec_stats.dead
+    );
+    eprintln!(
+        "AIG nodes with inversions free: {}",
+        encoder.aig_nodes() + decoder.aig_nodes()
     );
 
     let mut model = make_model(dataset, cfg, encoder, decoder);
@@ -1168,8 +1180,11 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
     )?;
 
     eprintln!(
-        "done: test BER {:.4}, val BER {:.4}, active gates {}",
-        test_report.ber, model.metrics.val_ber, model.metrics.active_gates
+        "done: test BER {:.4}, val BER {:.4}, active gates {} / AIG nodes {}",
+        test_report.ber,
+        model.metrics.val_ber,
+        model.metrics.active_gates,
+        model.encoder.aig_nodes() + model.decoder.aig_nodes()
     );
     Ok(model)
 }
