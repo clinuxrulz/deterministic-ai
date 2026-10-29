@@ -282,8 +282,8 @@ Dither baselines for the original 1-bit representation:
 | CIFAR XOR+AND | dither | 32 bits | 0.3927 | 0.4191 | 0.4214 | 347 active gates; beats the linear baseline by ~1.4 points |
 | CIFAR XOR+AND | threshold | 32 bits | 0.2126 | 0.2117 | **0.2134** | 292 active gates; 0.70% exact; same config, only preprocessing changed |
 
-The dither XOR+AND model is the current web demo model. The threshold run is
-substantially better and is the obvious next demo export.
+The **threshold XOR+AND model** is the current web demo model (test BER
+0.2134). The dither run remains selectable as a control.
 
 ### Binarization ablation
 

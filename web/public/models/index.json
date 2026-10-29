@@ -1,10 +1,16 @@
 {
   "models": [
     {
+      "id": "cats16-xor-and-threshold",
+      "name": "CIFAR cats 16×16 · XOR + AND (threshold)",
+      "path": "models/cats16-threshold.json",
+      "description": "Current best: threshold binarization, 32-bit key, test BER 21.34%."
+    },
+    {
       "id": "cats16-xor-and",
-      "name": "CIFAR cats 16×16 · XOR + AND",
+      "name": "CIFAR cats 16×16 · XOR + AND (dither)",
       "path": "models/cats16-xor-and.json",
-      "description": "Best current model: XOR-dominant universal Boolean circuit, 32-bit key."
+      "description": "Dither control: test BER 42.14%."
     },
     {
       "id": "cats16-xor",
