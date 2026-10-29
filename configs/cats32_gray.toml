@@ -1,0 +1,28 @@
+# 32x32 grayscale diagnostic: native CIFAR resolution, 1 bit/pixel.
+# 1024 input bits, 128-bit key (8x compression), 2048+2048 gates.
+image_size = 32
+key_bits = 128
+encoder_gates = 2048
+decoder_gates = 2048
+gate_set = "xor_and"
+binarize = "threshold"
+threshold = 128
+
+population = 96
+offspring = 96
+generations = 30000
+tournament = 4
+mutation_rate = 0.008
+crossover_rate = 0.10
+
+train_batch = 512
+val_batch = 512
+entropy_weight = 0.05
+uniqueness_weight = 0.01
+parsimony_weight = 0.001
+
+seed = 42
+val_every = 50
+checkpoint_every = 500
+stagnation_limit = 1000
+log_every = 50
