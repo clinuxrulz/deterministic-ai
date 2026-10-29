@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use xorae::config::TrainConfig;
 use xorae::dataset::Dataset;
 use xorae::{baselines, config, dataset, ga, render, toy};
+use xorae_core::color::ColorMode;
 use xorae_core::preprocess::{BinarizeMode, PreprocessOptions};
 use xorae_core::Model;
 
@@ -41,6 +42,14 @@ enum CliCommand {
         class: u8,
         #[arg(long, default_value_t = 128)]
         threshold: u8,
+        /// Build a global color palette instead of a 1-bit grayscale dataset.
+        #[arg(long)]
+        palette: Option<usize>,
+        /// Build a 3-channel 1-bit RGB dataset (8 colors).
+        #[arg(long)]
+        rgb1: bool,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
     },
     /// Run the genetic algorithm.
     Train {
@@ -136,25 +145,62 @@ fn main() -> Result<()> {
             binarize,
             class,
             threshold,
+            palette,
+            rgb1,
+            seed,
         } => {
-            let opts = PreprocessOptions {
-                size,
-                mode: parse_binarize(&binarize)?,
-                threshold,
-            };
-            let dataset = dataset::load_cifar10(&cifar_dir, class, opts)?;
-            dataset.save(&out)?;
-            let (train, val, test) = dataset.split_indices(42);
-            println!(
-                "wrote {} ({} images, {}x{} bits; {} train / {} val / {} test)",
-                out.display(),
-                dataset.n,
-                size,
-                size,
-                train.len(),
-                val.len(),
-                test.len()
-            );
+            if let Some(palette_size) = palette {
+                let dataset =
+                    dataset::load_cifar10_palette(&cifar_dir, class, size, palette_size, seed)?;
+                dataset.save(&out)?;
+                let (train, val, test) = dataset.split_indices(seed);
+                println!(
+                    "wrote {} ({} images, {}x{}, {} colors, {} bits/pixel; {} train / {} val / {} test)",
+                    out.display(),
+                    dataset.n,
+                    size,
+                    size,
+                    dataset.palette.len(),
+                    dataset.bits_per_pixel,
+                    train.len(),
+                    val.len(),
+                    test.len()
+                );
+            } else if rgb1 {
+                let dataset = dataset::load_cifar10_rgb1(&cifar_dir, class, size, threshold)?;
+                dataset.save(&out)?;
+                let (train, val, test) = dataset.split_indices(seed);
+                println!(
+                    "wrote {} ({} images, {}x{}, RGB 1-bit/channel, {} bits/pixel; {} train / {} val / {} test)",
+                    out.display(),
+                    dataset.n,
+                    size,
+                    size,
+                    dataset.channels,
+                    train.len(),
+                    val.len(),
+                    test.len()
+                );
+            } else {
+                let opts = PreprocessOptions {
+                    size,
+                    mode: parse_binarize(&binarize)?,
+                    threshold,
+                };
+                let dataset = dataset::load_cifar10(&cifar_dir, class, opts)?;
+                dataset.save(&out)?;
+                let (train, val, test) = dataset.split_indices(seed);
+                println!(
+                    "wrote {} ({} images, {}x{} bits; {} train / {} val / {} test)",
+                    out.display(),
+                    dataset.n,
+                    size,
+                    size,
+                    train.len(),
+                    val.len(),
+                    test.len()
+                );
+            }
             Ok(())
         }
         CliCommand::Train {
@@ -184,10 +230,11 @@ fn main() -> Result<()> {
                 let path = data.context("--data is required unless --toy is used")?;
                 Dataset::load(&path)?
             };
-            if dataset.cols() != cfg.image_size * cfg.image_size {
+            if dataset.size != cfg.image_size {
                 bail!(
-                    "dataset has {} bits per image, config expects {}x{}",
-                    dataset.cols(),
+                    "dataset is {}x{}, config expects {}x{}",
+                    dataset.size,
+                    dataset.size,
                     cfg.image_size,
                     cfg.image_size
                 );
@@ -198,11 +245,19 @@ fn main() -> Result<()> {
                 cfg.key_bits, cfg.image_size, cfg.image_size, cfg.generations, cfg.seed
             );
             let best = ga::run_ga(&dataset, &cfg, &out)?;
-            println!(
-                "best model written to {} (train BER {:.4})",
-                out.join("model.json").display(),
-                best.ber
-            );
+            if dataset.color_mode != ColorMode::Grayscale {
+                println!(
+                    "best model written to {} (train color MAE {:.4})",
+                    out.join("model.json").display(),
+                    best.color_mae
+                );
+            } else {
+                println!(
+                    "best model written to {} (train BER {:.4})",
+                    out.join("model.json").display(),
+                    best.ber
+                );
+            }
             Ok(())
         }
         CliCommand::Eval {
@@ -215,15 +270,29 @@ fn main() -> Result<()> {
             let dataset = load_eval_dataset(data, toy, &model)?;
             let indices = split_indices(&dataset, model.config.seed, &split)?;
             let report = ga::evaluate_model(&model, &dataset, &indices)?;
-            println!(
-                "{}: BER {:.4}, exact {:.2}%, key entropy {:.3}, active gates {} ({} samples)",
-                split,
-                report.ber,
-                report.exact_rate * 100.0,
-                report.key_entropy,
-                report.active_gates,
-                report.n
-            );
+            if dataset.color_mode != ColorMode::Grayscale {
+                println!(
+                    "{}: color MAE {:.4}, PSNR {:.2} dB, pixel/index accuracy {:.2}%, bit BER {:.4}, exact {:.2}%, active gates {} ({} samples)",
+                    split,
+                    report.color_mae,
+                    report.psnr,
+                    report.index_accuracy * 100.0,
+                    report.ber,
+                    report.exact_rate * 100.0,
+                    report.active_gates,
+                    report.n
+                );
+            } else {
+                println!(
+                    "{}: BER {:.4}, exact {:.2}%, key entropy {:.3}, active gates {} ({} samples)",
+                    split,
+                    report.ber,
+                    report.exact_rate * 100.0,
+                    report.key_entropy,
+                    report.active_gates,
+                    report.n
+                );
+            }
             Ok(())
         }
         CliCommand::Render {

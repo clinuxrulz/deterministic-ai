@@ -31,6 +31,7 @@ flamegraph.svg
 !/web/public/models/cats16-xor.json
 !/web/public/models/cats16-xor-and.json
 !/web/public/models/cats16-threshold.json
+!/web/public/models/cats16-rgb1.json
 /web/public/samples/*.png
 !/web/public/samples/toy-*.png
 !/web/public/samples/cat-*.png

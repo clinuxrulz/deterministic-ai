@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use image::{Rgb, RgbImage};
+use xorae_core::color::ColorMode;
 use xorae_core::Model;
 
 use crate::dataset::{Dataset, CIFAR_RECORD};
@@ -20,6 +21,9 @@ pub fn render_reconstructions(
 ) -> Result<()> {
     if indices.is_empty() {
         anyhow::bail!("no indices to render");
+    }
+    if dataset.color_mode != ColorMode::Grayscale {
+        return render_color_reconstructions(dataset, model, indices, out, scale);
     }
     let size = dataset.size;
     let tile = (size as u32) * scale;
@@ -63,6 +67,74 @@ pub fn render_reconstructions(
 enum Kind {
     Gray,
     Bits,
+}
+
+/// Render palette models as [original RGB, quantized input, reconstruction].
+fn render_color_reconstructions(
+    dataset: &Dataset,
+    model: &Model,
+    indices: &[usize],
+    out: &Path,
+    scale: u32,
+) -> Result<()> {
+    let size = dataset.size;
+    let tile = (size as u32) * scale;
+    let columns = 3u32;
+    let rows = indices.len() as u32;
+    let width = columns * tile + (columns + 1) * GAP;
+    let height = rows * tile + (rows + 1) * GAP;
+    let mut canvas = RgbImage::from_pixel(width, height, BACKGROUND);
+
+    for (row, &index) in indices.iter().enumerate() {
+        let y0 = GAP + row as u32 * (tile + GAP);
+        let bits = dataset.row_bits(index);
+        let (key, _) = model
+            .infer_bits(&bits)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("running model on sample {index}"))?;
+        let input_rgb = model.bits_to_rgb(&bits);
+        let recon_rgb = model
+            .decode_rgb(&key)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("decoding sample {index}"))?;
+        let original = dataset.row_rgb(index);
+
+        for (column, source) in [original, input_rgb.as_slice(), recon_rgb.as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let x0 = GAP + column as u32 * (tile + GAP);
+            draw_border(&mut canvas, x0, y0, tile);
+            draw_rgb(&mut canvas, x0, y0, source, size, scale);
+        }
+    }
+
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    canvas
+        .save(out)
+        .with_context(|| format!("writing {}", out.display()))?;
+    Ok(())
+}
+
+fn draw_rgb(canvas: &mut RgbImage, x0: u32, y0: u32, rgb: &[u8], size: usize, scale: u32) {
+    if rgb.len() < size * size * 3 {
+        return;
+    }
+    for y in 0..size {
+        for x in 0..size {
+            let i = (y * size + x) * 3;
+            let color = Rgb([rgb[i], rgb[i + 1], rgb[i + 2]]);
+            fill_block(
+                canvas,
+                x0 + x as u32 * scale,
+                y0 + y as u32 * scale,
+                scale,
+                color,
+            );
+        }
+    }
 }
 
 fn draw_border(canvas: &mut RgbImage, x0: u32, y0: u32, tile: u32) {

@@ -3,8 +3,11 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use xorae_core::bits::BitMatrix;
-use xorae_core::preprocess::{binarize, resize_box, PreprocessOptions};
+use xorae_core::color::{indices_to_bits, nearest_palette_index, ColorMode, Rgb};
+use xorae_core::preprocess::{binarize, resize_box, rgb_to_gray, PreprocessOptions};
 
 pub const CIFAR_RECORD: usize = 1 + 32 * 32 * 3;
 pub const CIFAR_CLASS_CAT: u8 = 3;
@@ -25,13 +28,27 @@ pub struct Dataset {
     pub bits: BitMatrix,
     /// Resized grayscale images, `n * size * size` bytes.
     pub gray: Vec<u8>,
+    /// Resized interleaved RGB images, `n * size * size * 3` bytes.
+    pub rgb: Vec<u8>,
+    /// Target palette index per pixel, `n * size * size` bytes.
+    pub values: Vec<u8>,
+    pub palette: Vec<Rgb>,
+    pub color_mode: ColorMode,
+    pub bits_per_pixel: usize,
+    pub channels: usize,
     pub is_test: Vec<bool>,
     pub split_mode: SplitMode,
 }
 
 impl Dataset {
-    pub fn cols(&self) -> usize {
+    /// Number of pixels per image.
+    pub fn pixels(&self) -> usize {
         self.size * self.size
+    }
+
+    /// Number of encoded bits per image.
+    pub fn cols(&self) -> usize {
+        self.bits.cols
     }
 
     pub fn row_bits(&self, index: usize) -> Vec<u8> {
@@ -41,10 +58,21 @@ impl Dataset {
     }
 
     pub fn row_gray(&self, index: usize) -> &[u8] {
-        let n = self.size * self.size;
+        let n = self.pixels();
         &self.gray[index * n..(index + 1) * n]
     }
 
+    pub fn row_rgb(&self, index: usize) -> &[u8] {
+        let n = self.pixels() * 3;
+        &self.rgb[index * n..(index + 1) * n]
+    }
+
+    pub fn row_values(&self, index: usize) -> &[u8] {
+        let n = self.pixels();
+        &self.values[index * n..(index + 1) * n]
+    }
+
+    /// Build a legacy grayscale dataset from 0/1 rows.
     pub fn from_parts(
         size: usize,
         rows: Vec<Vec<u8>>,
@@ -53,13 +81,101 @@ impl Dataset {
         split_mode: SplitMode,
     ) -> Self {
         let n = rows.len();
-        assert_eq!(gray.len(), n * size * size);
+        let pixels = size * size;
+        assert_eq!(gray.len(), n * pixels);
         assert_eq!(is_test.len(), n);
+
+        let mut values = Vec::with_capacity(n * pixels);
+        let mut rgb = Vec::with_capacity(n * pixels * 3);
+        for row in &rows {
+            for &bit in row {
+                values.push(bit & 1);
+            }
+        }
+        for &value in &gray {
+            rgb.extend_from_slice(&[value, value, value]);
+        }
+
         Self {
             size,
             n,
             bits: BitMatrix::from_bit_rows(&rows),
             gray,
+            rgb,
+            values,
+            palette: Vec::new(),
+            color_mode: ColorMode::Grayscale,
+            bits_per_pixel: 1,
+            channels: 1,
+            is_test,
+            split_mode,
+        }
+    }
+
+    /// Build a palette-encoded dataset. Grayscale is derived from the RGB.
+    pub fn from_color_parts(
+        size: usize,
+        rows: Vec<Vec<u8>>,
+        rgb: Vec<u8>,
+        values: Vec<u8>,
+        palette: Vec<Rgb>,
+        is_test: Vec<bool>,
+        split_mode: SplitMode,
+    ) -> Self {
+        let n = rows.len();
+        let pixels = size * size;
+        assert!(!palette.is_empty());
+        assert!(palette.len().is_power_of_two());
+        assert_eq!(rgb.len(), n * pixels * 3);
+        assert_eq!(values.len(), n * pixels);
+        assert_eq!(is_test.len(), n);
+        let gray = rgb_to_gray(size, size, &rgb);
+        let bits_per_pixel = palette.len().ilog2() as usize;
+
+        Self {
+            size,
+            n,
+            bits: BitMatrix::from_bit_rows(&rows),
+            gray,
+            rgb,
+            values,
+            palette,
+            color_mode: ColorMode::Palette,
+            bits_per_pixel,
+            channels: 1,
+            is_test,
+            split_mode,
+        }
+    }
+
+    /// Build an RGB 1-bit/channel dataset. Rows are channel-major:
+    /// `[R bits..., G bits..., B bits...]`.
+    pub fn from_rgb1_parts(
+        size: usize,
+        rows: Vec<Vec<u8>>,
+        gray: Vec<u8>,
+        rgb: Vec<u8>,
+        is_test: Vec<bool>,
+        split_mode: SplitMode,
+    ) -> Self {
+        let n = rows.len();
+        let pixels = size * size;
+        assert_eq!(gray.len(), n * pixels);
+        assert_eq!(rgb.len(), n * pixels * 3);
+        assert_eq!(is_test.len(), n);
+        assert!(rows.iter().all(|row| row.len() == pixels * 3));
+
+        Self {
+            size,
+            n,
+            bits: BitMatrix::from_bit_rows(&rows),
+            gray,
+            rgb,
+            values: vec![0u8; n * pixels],
+            palette: Vec::new(),
+            color_mode: ColorMode::Rgb1,
+            bits_per_pixel: 1,
+            channels: 3,
             is_test,
             split_mode,
         }
@@ -130,14 +246,27 @@ impl Dataset {
         let file =
             File::create(path).with_context(|| format!("creating dataset {}", path.display()))?;
         let mut w = BufWriter::new(file);
-        w.write_all(b"XAE2")?;
+        w.write_all(b"XAE4")?;
         w.write_all(&(self.size as u32).to_le_bytes())?;
         w.write_all(&(self.n as u32).to_le_bytes())?;
+        w.write_all(&[match self.color_mode {
+            ColorMode::Grayscale => 0,
+            ColorMode::Palette => 1,
+            ColorMode::Rgb1 => 2,
+        }])?;
+        w.write_all(&[self.bits_per_pixel as u8])?;
         w.write_all(&[match self.split_mode {
             SplitMode::Hash => 0,
             SplitMode::PreSplit => 1,
         }])?;
+        w.write_all(&[self.channels as u8])?;
+        w.write_all(&(self.palette.len() as u16).to_le_bytes())?;
+        for color in &self.palette {
+            w.write_all(color)?;
+        }
         w.write_all(&self.gray)?;
+        w.write_all(&self.rgb)?;
+        w.write_all(&self.values)?;
         for &word in &self.bits.data {
             w.write_all(&word.to_le_bytes())?;
         }
@@ -153,26 +282,70 @@ impl Dataset {
         let mut r = BufReader::new(file);
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic)?;
-        if &magic != b"XAE2" {
-            bail!("not an xorae dataset (bad magic)");
+
+        if &magic == b"XAE2" {
+            return load_v2(&mut r, path);
         }
+        let version = if &magic == b"XAE4" {
+            4
+        } else if &magic == b"XAE3" {
+            3
+        } else {
+            bail!("not an xorae dataset (bad magic)");
+        };
+
         let mut buf4 = [0u8; 4];
         r.read_exact(&mut buf4)?;
         let size = u32::from_le_bytes(buf4) as usize;
         r.read_exact(&mut buf4)?;
         let n = u32::from_le_bytes(buf4) as usize;
+
         let mut mode = [0u8; 1];
         r.read_exact(&mut mode)?;
-        let split_mode = match mode[0] {
+        let color_mode = match mode[0] {
+            0 => ColorMode::Grayscale,
+            1 => ColorMode::Palette,
+            2 => ColorMode::Rgb1,
+            other => bail!("unknown color mode {other}"),
+        };
+        let mut bpp = [0u8; 1];
+        r.read_exact(&mut bpp)?;
+        let bits_per_pixel = bpp[0] as usize;
+
+        let mut split = [0u8; 1];
+        r.read_exact(&mut split)?;
+        let split_mode = match split[0] {
             0 => SplitMode::Hash,
             1 => SplitMode::PreSplit,
             other => bail!("unknown split mode {other}"),
         };
-        let cols = size * size;
+        let channels = if version >= 4 {
+            let mut channels = [0u8; 1];
+            r.read_exact(&mut channels)?;
+            channels[0] as usize
+        } else {
+            1
+        };
 
-        let mut gray = vec![0u8; n * cols];
+        let mut palette_len = [0u8; 2];
+        r.read_exact(&mut palette_len)?;
+        let palette_len = u16::from_le_bytes(palette_len) as usize;
+        let mut palette = Vec::with_capacity(palette_len);
+        for _ in 0..palette_len {
+            let mut color = [0u8; 3];
+            r.read_exact(&mut color)?;
+            palette.push(color);
+        }
+
+        let pixels = size * size;
+        let mut gray = vec![0u8; n * pixels];
         r.read_exact(&mut gray)?;
+        let mut rgb = vec![0u8; n * pixels * 3];
+        r.read_exact(&mut rgb)?;
+        let mut values = vec![0u8; n * pixels];
+        r.read_exact(&mut values)?;
 
+        let cols = pixels * channels * bits_per_pixel;
         let mut bits = BitMatrix::new(n, cols);
         let mut word_bytes = [0u8; 8];
         for word in bits.data.iter_mut() {
@@ -189,21 +362,79 @@ impl Dataset {
             n,
             bits,
             gray,
+            rgb,
+            values,
+            palette,
+            color_mode,
+            bits_per_pixel,
+            channels,
             is_test,
             split_mode,
         })
     }
 }
 
+fn load_v2<R: Read>(r: &mut R, path: &Path) -> Result<Dataset> {
+    let mut buf4 = [0u8; 4];
+    r.read_exact(&mut buf4)?;
+    let size = u32::from_le_bytes(buf4) as usize;
+    r.read_exact(&mut buf4)?;
+    let n = u32::from_le_bytes(buf4) as usize;
+    let mut mode = [0u8; 1];
+    r.read_exact(&mut mode)?;
+    let split_mode = match mode[0] {
+        0 => SplitMode::Hash,
+        1 => SplitMode::PreSplit,
+        other => bail!("unknown split mode {other}"),
+    };
+    let pixels = size * size;
+    let mut gray = vec![0u8; n * pixels];
+    r.read_exact(&mut gray)?;
+    let mut bits = BitMatrix::new(n, pixels);
+    let mut word_bytes = [0u8; 8];
+    for word in bits.data.iter_mut() {
+        r.read_exact(&mut word_bytes)?;
+        *word = u64::from_le_bytes(word_bytes);
+    }
+    let mut flags = vec![0u8; n];
+    r.read_exact(&mut flags)?;
+    let is_test = flags.iter().map(|&b| b != 0).collect();
+
+    let mut rgb = Vec::with_capacity(n * pixels * 3);
+    for &value in &gray {
+        rgb.extend_from_slice(&[value, value, value]);
+    }
+    let mut values = Vec::with_capacity(n * pixels);
+    for row in 0..n {
+        for col in 0..pixels {
+            values.push(u8::from(bits.get(row, col)));
+        }
+    }
+
+    eprintln!(
+        "note: loaded legacy XAE2 dataset {} (grayscale); re-run `preprocess` for XAE3",
+        path.display()
+    );
+    Ok(Dataset {
+        size,
+        n,
+        bits,
+        gray,
+        rgb,
+        values,
+        palette: Vec::new(),
+        color_mode: ColorMode::Grayscale,
+        bits_per_pixel: 1,
+        channels: 1,
+        is_test,
+        split_mode,
+    })
+}
+
 /// Load CIFAR-10 binary batches, keep one class, and apply the shared
 /// grayscale/resize/binarize pipeline.
 pub fn load_cifar10(dir: &Path, class: u8, opts: PreprocessOptions) -> Result<Dataset> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    for i in 1..=5 {
-        files.push(dir.join(format!("data_batch_{i}.bin")));
-    }
-    files.push(dir.join("test_batch.bin"));
-
+    let files = cifar_files(dir);
     let mut rows: Vec<Vec<u8>> = Vec::new();
     let mut gray: Vec<u8> = Vec::new();
     let mut is_test: Vec<bool> = Vec::new();
@@ -225,9 +456,7 @@ pub fn load_cifar10(dir: &Path, class: u8, opts: PreprocessOptions) -> Result<Da
             if label != class {
                 continue;
             }
-            let pixels = &record[1..];
-            let (red, rest) = pixels.split_at(32 * 32);
-            let (green, blue) = rest.split_at(32 * 32);
+            let (red, green, blue) = planar_channels(record);
             let gray32 = planar_rgb_to_gray(red, green, blue);
             let small = resize_box(&gray32, 32, 32, opts.size);
             let bits = binarize(&small, opts.mode, opts.threshold);
@@ -248,6 +477,302 @@ pub fn load_cifar10(dir: &Path, class: u8, opts: PreprocessOptions) -> Result<Da
         is_test,
         SplitMode::Hash,
     ))
+}
+
+/// Load CIFAR-10 and build a global color palette of `palette_size` colors.
+pub fn load_cifar10_palette(
+    dir: &Path,
+    class: u8,
+    size: usize,
+    palette_size: usize,
+    seed: u64,
+) -> Result<Dataset> {
+    if !palette_size.is_power_of_two() || !(2..=256).contains(&palette_size) {
+        bail!("palette size must be a power of two in 2..=256");
+    }
+    let files = cifar_files(dir);
+    let mut rgb: Vec<u8> = Vec::new();
+    let mut is_test: Vec<bool> = Vec::new();
+
+    for path in files {
+        let data = std::fs::read(&path)
+            .with_context(|| format!("reading CIFAR batch {}", path.display()))?;
+        if data.len() % CIFAR_RECORD != 0 {
+            bail!(
+                "{} has length {}, which is not a multiple of {}",
+                path.display(),
+                data.len(),
+                CIFAR_RECORD
+            );
+        }
+        let test_file = path.file_name().and_then(|s| s.to_str()) == Some("test_batch.bin");
+        for record in data.chunks_exact(CIFAR_RECORD) {
+            if record[0] != class {
+                continue;
+            }
+            let (red, green, blue) = planar_channels(record);
+            let small_rgb = resize_rgb_box(red, green, blue, 32, 32, size);
+            rgb.extend_from_slice(&small_rgb);
+            is_test.push(test_file);
+        }
+    }
+
+    let n = is_test.len();
+    if n == 0 {
+        bail!("no images with class {} found in {}", class, dir.display());
+    }
+    let pixels = size * size;
+
+    // Build the palette from a deterministic sample of training pixels.
+    let mut samples: Vec<Rgb> = Vec::new();
+    for row in 0..n {
+        if is_test[row] {
+            continue;
+        }
+        let image = &rgb[row * pixels * 3..(row + 1) * pixels * 3];
+        for p in (0..pixels).step_by(4) {
+            samples.push([image[p * 3], image[p * 3 + 1], image[p * 3 + 2]]);
+        }
+    }
+    let palette = kmeans_palette(&samples, palette_size, seed);
+
+    let bits_per_pixel = palette_size.ilog2() as usize;
+    let mut values = Vec::with_capacity(n * pixels);
+    let mut rows = Vec::with_capacity(n);
+    for row in 0..n {
+        let image = &rgb[row * pixels * 3..(row + 1) * pixels * 3];
+        let mut indices = Vec::with_capacity(pixels);
+        for p in 0..pixels {
+            indices.push(nearest_palette_index(
+                image[p * 3],
+                image[p * 3 + 1],
+                image[p * 3 + 2],
+                &palette,
+            ));
+        }
+        values.extend_from_slice(&indices);
+        rows.push(indices_to_bits(&indices, bits_per_pixel));
+    }
+
+    Ok(Dataset::from_color_parts(
+        size,
+        rows,
+        rgb,
+        values,
+        palette,
+        is_test,
+        SplitMode::Hash,
+    ))
+}
+
+/// Load CIFAR-10 and threshold each RGB channel independently.
+pub fn load_cifar10_rgb1(dir: &Path, class: u8, size: usize, threshold: u8) -> Result<Dataset> {
+    let files = cifar_files(dir);
+    let pixels = size * size;
+    let mut rows: Vec<Vec<u8>> = Vec::new();
+    let mut gray: Vec<u8> = Vec::new();
+    let mut rgb: Vec<u8> = Vec::new();
+    let mut is_test: Vec<bool> = Vec::new();
+
+    for path in files {
+        let data = std::fs::read(&path)
+            .with_context(|| format!("reading CIFAR batch {}", path.display()))?;
+        if data.len() % CIFAR_RECORD != 0 {
+            bail!(
+                "{} has length {}, which is not a multiple of {}",
+                path.display(),
+                data.len(),
+                CIFAR_RECORD
+            );
+        }
+        let test_file = path.file_name().and_then(|s| s.to_str()) == Some("test_batch.bin");
+        for record in data.chunks_exact(CIFAR_RECORD) {
+            if record[0] != class {
+                continue;
+            }
+            let (red, green, blue) = planar_channels(record);
+            let small_rgb = resize_rgb_box(red, green, blue, 32, 32, size);
+            let small_gray = rgb_to_gray(size, size, &small_rgb);
+            let mut row = Vec::with_capacity(pixels * 3);
+            for channel in 0..3 {
+                for p in 0..pixels {
+                    row.push(u8::from(small_rgb[p * 3 + channel] >= threshold));
+                }
+            }
+            rows.push(row);
+            gray.extend_from_slice(&small_gray);
+            rgb.extend_from_slice(&small_rgb);
+            is_test.push(test_file);
+        }
+    }
+
+    if rows.is_empty() {
+        bail!("no images with class {} found in {}", class, dir.display());
+    }
+
+    Ok(Dataset::from_rgb1_parts(
+        size,
+        rows,
+        gray,
+        rgb,
+        is_test,
+        SplitMode::Hash,
+    ))
+}
+
+fn cifar_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for i in 1..=5 {
+        files.push(dir.join(format!("data_batch_{i}.bin")));
+    }
+    files.push(dir.join("test_batch.bin"));
+    files
+}
+
+fn planar_channels(record: &[u8]) -> (&[u8], &[u8], &[u8]) {
+    let pixels = &record[1..];
+    let (red, rest) = pixels.split_at(32 * 32);
+    let (green, blue) = rest.split_at(32 * 32);
+    (red, green, blue)
+}
+
+/// Box-resize planar RGB to an interleaved `size × size` RGB buffer.
+fn resize_rgb_box(
+    red: &[u8],
+    green: &[u8],
+    blue: &[u8],
+    width: usize,
+    height: usize,
+    size: usize,
+) -> Vec<u8> {
+    assert_eq!(red.len(), width * height);
+    assert_eq!(green.len(), width * height);
+    assert_eq!(blue.len(), width * height);
+    if width == size && height == size {
+        let mut out = Vec::with_capacity(size * size * 3);
+        for i in 0..width * height {
+            out.extend_from_slice(&[red[i], green[i], blue[i]]);
+        }
+        return out;
+    }
+
+    let mut out = vec![0u8; size * size * 3];
+    for oy in 0..size {
+        let y0 = oy * height / size;
+        let y1 = ((oy + 1) * height / size).max(y0 + 1);
+        for ox in 0..size {
+            let x0 = ox * width / size;
+            let x1 = ((ox + 1) * width / size).max(x0 + 1);
+            let mut sums = [0u32; 3];
+            let mut count = 0u32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = y * width + x;
+                    sums[0] += red[i] as u32;
+                    sums[1] += green[i] as u32;
+                    sums[2] += blue[i] as u32;
+                    count += 1;
+                }
+            }
+            let out_index = (oy * size + ox) * 3;
+            out[out_index] = (sums[0] / count.max(1)) as u8;
+            out[out_index + 1] = (sums[1] / count.max(1)) as u8;
+            out[out_index + 2] = (sums[2] / count.max(1)) as u8;
+        }
+    }
+    out
+}
+
+fn kmeans_palette(samples: &[Rgb], k: usize, seed: u64) -> Vec<Rgb> {
+    if samples.is_empty() {
+        return vec![[0, 0, 0]; k];
+    }
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut centroids: Vec<[f32; 3]> = Vec::with_capacity(k);
+    let first = samples[rng.gen_range(0..samples.len())];
+    centroids.push([first[0] as f32, first[1] as f32, first[2] as f32]);
+
+    let mut min_distances = vec![f32::MAX; samples.len()];
+    while centroids.len() < k {
+        let mut total = 0.0f32;
+        for (i, sample) in samples.iter().enumerate() {
+            let distance = distance_to_centroids(sample, &centroids).1;
+            if distance < min_distances[i] {
+                min_distances[i] = distance;
+            }
+            total += min_distances[i];
+        }
+        if total <= 0.0 {
+            break;
+        }
+        let mut target = rng.gen::<f32>() * total;
+        let mut chosen = 0usize;
+        for (i, &distance) in min_distances.iter().enumerate() {
+            target -= distance;
+            if target <= 0.0 {
+                chosen = i;
+                break;
+            }
+        }
+        let sample = samples[chosen];
+        centroids.push([sample[0] as f32, sample[1] as f32, sample[2] as f32]);
+    }
+    while centroids.len() < k {
+        let sample = samples[rng.gen_range(0..samples.len())];
+        centroids.push([sample[0] as f32, sample[1] as f32, sample[2] as f32]);
+    }
+
+    for _ in 0..15 {
+        let mut sums = vec![[0.0f64; 3]; k];
+        let mut counts = vec![0u32; k];
+        for sample in samples {
+            let (index, _) = distance_to_centroids(sample, &centroids);
+            sums[index][0] += sample[0] as f64;
+            sums[index][1] += sample[1] as f64;
+            sums[index][2] += sample[2] as f64;
+            counts[index] += 1;
+        }
+        for index in 0..k {
+            if counts[index] > 0 {
+                let count = counts[index] as f64;
+                centroids[index] = [
+                    (sums[index][0] / count).round() as f32,
+                    (sums[index][1] / count).round() as f32,
+                    (sums[index][2] / count).round() as f32,
+                ];
+            } else {
+                let sample = samples[rng.gen_range(0..samples.len())];
+                centroids[index] = [sample[0] as f32, sample[1] as f32, sample[2] as f32];
+            }
+        }
+    }
+
+    centroids
+        .into_iter()
+        .map(|c| {
+            [
+                c[0].round().clamp(0.0, 255.0) as u8,
+                c[1].round().clamp(0.0, 255.0) as u8,
+                c[2].round().clamp(0.0, 255.0) as u8,
+            ]
+        })
+        .collect()
+}
+
+fn distance_to_centroids(sample: &Rgb, centroids: &[[f32; 3]]) -> (usize, f32) {
+    let mut best = 0usize;
+    let mut best_distance = f32::MAX;
+    for (i, centroid) in centroids.iter().enumerate() {
+        let dr = sample[0] as f32 - centroid[0];
+        let dg = sample[1] as f32 - centroid[1];
+        let db = sample[2] as f32 - centroid[2];
+        let distance = dr * dr + dg * dg + db * db;
+        if distance < best_distance {
+            best_distance = distance;
+            best = i;
+        }
+    }
+    (best, best_distance)
 }
 
 /// CIFAR binary records store channels plane-by-plane: 1024 red bytes, then

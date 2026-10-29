@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, onSettled, Repeat, Show } from "solid-js";
-import init, { ModelHandle, preprocess_rgba } from "./wasm/pkg/xorae_wasm";
+import init, { ModelHandle } from "./wasm/pkg/xorae_wasm";
 import "./App.css";
 
 const wasmReady = init();
@@ -20,6 +20,8 @@ type InferenceResult = {
   bits: Uint8Array;
   key: Uint8Array;
   recon: Uint8Array;
+  inputRgb: Uint8Array;
+  reconRgb: Uint8Array;
 };
 
 const base = import.meta.env.BASE_URL;
@@ -41,7 +43,7 @@ async function loadImage(url: string): Promise<HTMLImageElement> {
   return image;
 }
 
-function imageToBits(image: HTMLImageElement, model: ModelHandle): InferenceResult {
+function runImage(image: HTMLImageElement, model: ModelHandle): InferenceResult {
   const width = image.naturalWidth;
   const height = image.naturalHeight;
   if (width === 0 || height === 0) throw new Error("image has no pixels");
@@ -54,17 +56,13 @@ function imageToBits(image: HTMLImageElement, model: ModelHandle): InferenceResu
 
   context.drawImage(image, 0, 0);
   const rgba = new Uint8Array(context.getImageData(0, 0, width, height).data);
-  const bits = preprocess_rgba(
-    rgba,
-    width,
-    height,
-    model.image_size,
-    model.binarize,
-    model.threshold,
-  );
+  const bits = model.preprocess(rgba, width, height);
   const key = model.encode(bits);
-  const recon = model.decode_key(key);
-  return { bits, key, recon };
+  const color = model.color_mode !== "grayscale";
+  const recon = color ? new Uint8Array() : model.decode_key(key);
+  const inputRgb = color ? model.bits_to_rgb(bits) : new Uint8Array();
+  const reconRgb = color ? model.decode_rgb(key) : new Uint8Array();
+  return { bits, key, recon, inputRgb, reconRgb };
 }
 
 export default function App() {
@@ -76,6 +74,13 @@ export default function App() {
   const [original, setOriginal] = createSignal<Uint8Array>(new Uint8Array());
   const [keyBits, setKeyBits] = createSignal<Uint8Array>(new Uint8Array());
   const [recon, setRecon] = createSignal<Uint8Array>(new Uint8Array());
+  const [inputRgb, setInputRgb] = createSignal<Uint8Array>(new Uint8Array());
+  const [reconRgb, setReconRgb] = createSignal<Uint8Array>(new Uint8Array());
+
+  const isColor = () => {
+    const current = model();
+    return current ? current.color_mode !== "grayscale" : false;
+  };
 
   const diff = createMemo(() => {
     const a = original();
@@ -84,6 +89,41 @@ export default function App() {
     const out = new Uint8Array(n);
     for (let i = 0; i < n; i += 1) out[i] = a[i] !== b[i] ? 1 : 0;
     return out;
+  });
+
+  const diffRgb = createMemo(() => {
+    const a = inputRgb();
+    const b = reconRgb();
+    const pixels = Math.floor(Math.min(a.length, b.length) / 3);
+    const out = new Uint8Array(pixels);
+    for (let p = 0; p < pixels; p += 1) {
+      const i = p * 3;
+      out[p] = a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] ? 1 : 0;
+    }
+    return out;
+  });
+
+  const colorMae = createMemo(() => {
+    const a = inputRgb();
+    const b = reconRgb();
+    const n = Math.min(a.length, b.length);
+    if (n === 0) return 0;
+    let total = 0;
+    for (let i = 0; i < n; i += 1) total += Math.abs(a[i] - b[i]);
+    return total / (n * 255);
+  });
+
+  const pixelAccuracy = createMemo(() => {
+    const a = inputRgb();
+    const b = reconRgb();
+    const pixels = Math.floor(Math.min(a.length, b.length) / 3);
+    if (pixels === 0) return 0;
+    let correct = 0;
+    for (let p = 0; p < pixels; p += 1) {
+      const i = p * 3;
+      if (a[i] === b[i] && a[i + 1] === b[i + 1] && a[i + 2] === b[i + 2]) correct += 1;
+    }
+    return correct / pixels;
   });
 
   const ber = createMemo(() => {
@@ -115,6 +155,8 @@ export default function App() {
     setOriginal(result.bits);
     setKeyBits(result.key);
     setRecon(result.recon);
+    setInputRgb(result.inputRgb);
+    setReconRgb(result.reconRgb);
     setImageUrl(url);
   }
 
@@ -126,7 +168,11 @@ export default function App() {
     await wasmReady;
     const handle = new ModelHandle(json);
     setModel(handle);
-    setStatus(`loaded ${entry.name} (val BER ${(handle.val_ber * 100).toFixed(2)}%)`);
+    const summary =
+      handle.color_mode === "grayscale"
+        ? `val BER ${(handle.val_ber * 100).toFixed(2)}%`
+        : `test color MAE ${(handle.test_color_mae * 100).toFixed(2)}%`;
+    setStatus(`loaded ${entry.name} (${summary})`);
     return handle;
   }
 
@@ -140,7 +186,7 @@ export default function App() {
       const url = asset(sample.path);
       setStatus(`running ${sample.name}…`);
       const image = await loadImage(url);
-      apply(imageToBits(image, current), url);
+      apply(runImage(image, current), url);
       setStatus("done");
     } catch (error) {
       setStatus(String(error));
@@ -171,7 +217,7 @@ export default function App() {
     const url = URL.createObjectURL(file);
     try {
       const image = await loadImage(url);
-      apply(imageToBits(image, current), url);
+      apply(runImage(image, current), url);
       setStatus("done");
     } catch (error) {
       setStatus(String(error));
@@ -184,7 +230,11 @@ export default function App() {
     const next = new Uint8Array(keyBits());
     next[index] ^= 1;
     setKeyBits(next);
-    setRecon(current.decode_key(next));
+    if (current.color_mode === "grayscale") {
+      setRecon(current.decode_key(next));
+    } else {
+      setReconRgb(current.decode_rgb(next));
+    }
   }
 
   onSettled(() => {
@@ -247,11 +297,23 @@ export default function App() {
       <Show when={model()}>
         {(current) => (
           <section class="modelcard">
+            <div><span>mode</span><strong>{current().color_mode}</strong></div>
             <div><span>gate set</span><strong>{current().gate_set}</strong></div>
             <div><span>key</span><strong>{current().key_bits} bits</strong></div>
             <div><span>gates</span><strong>{current().gate_count}</strong></div>
-            <div><span>val BER</span><strong>{(current().val_ber * 100).toFixed(2)}%</strong></div>
-            <div><span>test BER</span><strong>{(current().test_ber * 100).toFixed(2)}%</strong></div>
+            <Show
+              when={isColor()}
+              fallback={
+                <>
+                  <div><span>val BER</span><strong>{(current().val_ber * 100).toFixed(2)}%</strong></div>
+                  <div><span>test BER</span><strong>{(current().test_ber * 100).toFixed(2)}%</strong></div>
+                </>
+              }
+            >
+              <div><span>test color MAE</span><strong>{(current().test_color_mae * 100).toFixed(2)}%</strong></div>
+              <div><span>test PSNR</span><strong>{current().test_psnr.toFixed(2)} dB</strong></div>
+              <div><span>pixel accuracy</span><strong>{(current().test_index_accuracy * 100).toFixed(2)}%</strong></div>
+            </Show>
             <div><span>seed</span><strong>{current().seed}</strong></div>
           </section>
         )}
@@ -281,7 +343,9 @@ export default function App() {
               {(url) => <img class="preview" src={url()} alt="input" />}
             </Show>
           </div>
-          <BitGrid bits={original()} diff={diff()} />
+          <Show when={isColor()} fallback={<BitGrid bits={original()} diff={diff()} />}>
+            <ColorGrid rgb={inputRgb()} diff={diffRgb()} />
+          </Show>
         </article>
 
         <article class="panel">
@@ -305,14 +369,53 @@ export default function App() {
 
         <article class="panel">
           <h2>reconstruction</h2>
-          <BitGrid bits={recon()} diff={diff()} />
-          <p class="metric">
-            bit error rate <strong>{(ber() * 100).toFixed(2)}%</strong>
+          <Show when={isColor()} fallback={<BitGrid bits={recon()} diff={diff()} />}>
+            <ColorGrid rgb={reconRgb()} diff={diffRgb()} />
+          </Show>
+          <Show
+            when={isColor()}
+            fallback={
+              <p class="metric">
+                bit error rate <strong>{(ber() * 100).toFixed(2)}%</strong>
+              </p>
+            }
+          >
+            <p class="metric">
+              color MAE <strong>{(colorMae() * 100).toFixed(2)}%</strong>
+              {" · "}
+              pixel accuracy <strong>{(pixelAccuracy() * 100).toFixed(2)}%</strong>
+            </p>
+          </Show>
+          <p class="hint">
+            {isColor() ? "Red outlines mark pixels that differ." : "Red cells differ from the binarized input."}
           </p>
-          <p class="hint">Red cells differ from the binarized input.</p>
         </article>
       </section>
     </main>
+  );
+}
+
+function ColorGrid(props: { rgb: Uint8Array; diff: Uint8Array }) {
+  const side = createMemo(() => Math.max(1, Math.round(Math.sqrt(props.rgb.length / 3))));
+  return (
+    <div
+      class="colorgrid"
+      style={{ "grid-template-columns": `repeat(${side()}, 1fr)` }}
+    >
+      <Repeat count={side() * side()}>
+        {(index) => {
+          const i = index * 3;
+          const color = () => `rgb(${props.rgb[i]}, ${props.rgb[i + 1]}, ${props.rgb[i + 2]})`;
+          const changed = () => props.diff[index] === 1;
+          return (
+            <div
+              class={changed() ? "colorcell changed" : "colorcell"}
+              style={{ "background-color": color() }}
+            />
+          );
+        }}
+      </Repeat>
+    </div>
   );
 }
 

@@ -1,10 +1,16 @@
 {
   "models": [
     {
+      "id": "cats16-rgb1",
+      "name": "CIFAR cats 16×16 · RGB 1-bit/channel",
+      "path": "models/cats16-rgb1.json",
+      "description": "Color experiment: 8-color RGB posterization, 128-bit key."
+    },
+    {
       "id": "cats16-xor-and-threshold",
       "name": "CIFAR cats 16×16 · XOR + AND (threshold)",
       "path": "models/cats16-threshold.json",
-      "description": "Current best: threshold binarization, 32-bit key, test BER 22.85%."
+      "description": "Grayscale control: threshold binarization, 32-bit key, test BER 22.85%."
     },
     {
       "id": "cats16-xor-and",

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::color::{indices_to_bits, nearest_palette_index, Rgb};
+
 /// How to turn a grayscale image into bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -169,6 +171,94 @@ pub fn binarize_dither(gray: &[u8], threshold: u8) -> Vec<u8> {
     out
 }
 
+/// Convert RGBA pixels to interleaved RGB.
+pub fn rgba_to_rgb(width: usize, height: usize, rgba: &[u8]) -> Vec<u8> {
+    assert_eq!(rgba.len(), width * height * 4);
+    let mut rgb = Vec::with_capacity(width * height * 3);
+    for pixel in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+    rgb
+}
+
+/// Box-downsample interleaved RGB to `size × size`.
+pub fn resize_rgb_box(rgb: &[u8], width: usize, height: usize, size: usize) -> Vec<u8> {
+    assert_eq!(rgb.len(), width * height * 3);
+    if width == size && height == size {
+        return rgb.to_vec();
+    }
+    let mut out = vec![0u8; size * size * 3];
+    for oy in 0..size {
+        let y0 = oy * height / size;
+        let y1 = ((oy + 1) * height / size).max(y0 + 1);
+        for ox in 0..size {
+            let x0 = ox * width / size;
+            let x1 = ((ox + 1) * width / size).max(x0 + 1);
+            let mut sums = [0u32; 3];
+            let mut count = 0u32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y * width + x) * 3;
+                    sums[0] += rgb[i] as u32;
+                    sums[1] += rgb[i + 1] as u32;
+                    sums[2] += rgb[i + 2] as u32;
+                    count += 1;
+                }
+            }
+            let o = (oy * size + ox) * 3;
+            out[o] = (sums[0] / count.max(1)) as u8;
+            out[o + 1] = (sums[1] / count.max(1)) as u8;
+            out[o + 2] = (sums[2] / count.max(1)) as u8;
+        }
+    }
+    out
+}
+
+/// RGB 1-bit/channel: three channel-major bit planes at `size × size`.
+pub fn rgba_to_bits_rgb1(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    size: usize,
+    threshold: u8,
+) -> Vec<u8> {
+    let rgb = rgba_to_rgb(width, height, rgba);
+    let small = resize_rgb_box(&rgb, width, height, size);
+    let pixels = size * size;
+    let mut bits = Vec::with_capacity(pixels * 3);
+    for channel in 0..3 {
+        for p in 0..pixels {
+            bits.push(u8::from(small[p * 3 + channel] >= threshold));
+        }
+    }
+    bits
+}
+
+/// Palette indices encoded as `bits_per_pixel` bits per pixel.
+pub fn rgba_to_bits_palette(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    size: usize,
+    palette: &[Rgb],
+) -> Vec<u8> {
+    assert!(palette.len().is_power_of_two());
+    let bpp = palette.len().ilog2() as usize;
+    let rgb = rgba_to_rgb(width, height, rgba);
+    let small = resize_rgb_box(&rgb, width, height, size);
+    let pixels = size * size;
+    let mut indices = Vec::with_capacity(pixels);
+    for p in 0..pixels {
+        indices.push(nearest_palette_index(
+            small[p * 3],
+            small[p * 3 + 1],
+            small[p * 3 + 2],
+            palette,
+        ));
+    }
+    indices_to_bits(&indices, bpp)
+}
+
 /// Convert RGB pixels to bits using the shared resize/binarize pipeline.
 pub fn rgb_to_bits(width: usize, height: usize, rgb: &[u8], opts: PreprocessOptions) -> Vec<u8> {
     let gray = rgb_to_gray(width, height, rgb);
@@ -254,5 +344,27 @@ mod tests {
         );
         assert_eq!(bits.len(), 256);
         assert!(bits.iter().all(|&b| b == 1));
+    }
+
+    #[test]
+    fn rgb1_channels_are_planar() {
+        // 2x2 pure red image: R plane all 1, G/B planes all 0.
+        let mut rgba = Vec::new();
+        for _ in 0..4 {
+            rgba.extend_from_slice(&[255, 0, 0, 255]);
+        }
+        let bits = rgba_to_bits_rgb1(2, 2, &rgba, 2, 128);
+        assert_eq!(bits.len(), 12);
+        assert!(bits[0..4].iter().all(|&b| b == 1));
+        assert!(bits[4..12].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn palette_preprocess_encodes_indices() {
+        let palette = vec![[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255]];
+        let rgba = [255u8, 0, 0, 255].repeat(4);
+        let bits = rgba_to_bits_palette(2, 2, &rgba, 2, &palette);
+        // four pixels, index 1 -> bits [1, 0] each, pixel-major
+        assert_eq!(bits, vec![1, 0, 1, 0, 1, 0, 1, 0]);
     }
 }

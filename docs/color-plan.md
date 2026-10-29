@@ -18,6 +18,26 @@ The three levers are:
 2. **Key/gate capacity** — color needs more bits than 1-bit grayscale.
 3. **Color-aware loss** — bit Hamming is not a perceptual color objective.
 
+## Current results (2026-10-29)
+
+- **16-color palette** (4 bits/pixel, 64/128-bit key, up to 2,048+2,048 gates):
+  - Test color MAE ~0.273, index accuracy ~6.3% — essentially chance (1/16).
+  - The model overfit the 128/512-image training batch but did not generalize.
+  - Palette indices are categorical; the loss landscape is flat and the GA
+    stayed at chance. **Negative result.**
+- **RGB 1-bit/channel** (3 binary planes, 768 bits, 128-bit key,
+  1,024+1,024 gates):
+  - 1,500 generations: test color MAE 0.356, pixel accuracy 36%.
+  - 10,000 generations: test color MAE 0.237, pixel accuracy 53%.
+  - 30,000 generations (final): test color MAE **0.1729**, pixel accuracy
+    **64.06%**, PSNR 7.62 dB, 577 active gates.
+  - This encoding learns, because each channel is a spatially structured binary
+    image. **Viable first color demo; now the web default.**
+- **Decision:** RGB 1-bit/channel is the first color demo; the palette result is
+  a documented negative experiment. YCbCr 4:2:0 remains the planned next step
+  for smoother color.
+
+
 ---
 
 ## Phase 1 — 16-color global palette (first implementation)

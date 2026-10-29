@@ -128,3 +128,10 @@ of the current implementation.
 - Reconstructions are coarse at 16×16 with a 32-bit key. See
   `runs/cats16-xor-and/recon.png`, `runs/cats16-xor-and-threshold/recon.png`,
   and the Solid demo in `web/`.
+- Color:
+  - 16-color global palette (4 bits/pixel, 64/128-bit key): index accuracy
+    stayed at chance (~6.3%), test color MAE ~0.273. Negative result.
+  - RGB 1-bit/channel (3 binary planes, 768 bits, 128-bit key, 1,024+1,024
+    gates): test color MAE **0.1729**, pixel accuracy **64.06%**, PSNR 7.62 dB,
+    577 active gates, 30,000 generations. The web demo defaults to this model.
+  - Next: YCbCr 4:2:0 for smoother chroma.

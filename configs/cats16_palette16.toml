@@ -1,0 +1,28 @@
+# Phase 1 color experiment: 16-color global palette.
+# Encoder input = 16x16 x 4 bits = 1024 bits; key = 64 bits.
+image_size = 16
+key_bits = 64
+encoder_gates = 1024
+decoder_gates = 1024
+gate_set = "xor_and"
+binarize = "threshold"
+threshold = 128
+
+population = 64
+offspring = 64
+generations = 1500
+tournament = 4
+mutation_rate = 0.01
+crossover_rate = 0.10
+
+train_batch = 128
+val_batch = 256
+entropy_weight = 0.05
+uniqueness_weight = 0.01
+parsimony_weight = 0.001
+
+seed = 42
+val_every = 25
+checkpoint_every = 100
+stagnation_limit = 300
+log_every = 10

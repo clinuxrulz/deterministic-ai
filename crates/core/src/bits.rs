@@ -95,6 +95,8 @@ pub struct BitBatch {
     pub words: usize,
     /// Total number of samples in the batch (needed to mask the last word).
     pub len: usize,
+    /// Source row indices in the underlying `BitMatrix`.
+    pub indices: Vec<usize>,
     pub planes: Vec<u64>,
 }
 
@@ -117,6 +119,7 @@ impl BitBatch {
             cols: matrix.cols,
             words,
             len: indices.len(),
+            indices: indices.to_vec(),
             planes,
         }
     }

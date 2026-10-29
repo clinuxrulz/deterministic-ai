@@ -9,6 +9,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use xorae_core::bits::{plane_hamming, BitBatch};
+use xorae_core::color::{psnr_from_mse, ColorMode};
 use xorae_core::{Circuit, GateSet, Model, ModelConfig, ModelMetrics};
 
 use crate::config::TrainConfig;
@@ -20,6 +21,8 @@ pub struct Individual {
     pub decoder: Circuit,
     pub fitness: f32,
     pub ber: f32,
+    pub color_mae: f32,
+    pub index_accuracy: f32,
     pub key_entropy: f32,
     pub key_uniqueness: f32,
     pub active_gates: usize,
@@ -29,6 +32,10 @@ pub struct Individual {
 pub struct EvalReport {
     pub fitness: f32,
     pub ber: f32,
+    pub color_mae: f32,
+    pub color_mse: f32,
+    pub psnr: f32,
+    pub index_accuracy: f32,
     pub key_entropy: f32,
     pub key_uniqueness: f32,
     pub active_gates: usize,
@@ -37,15 +44,28 @@ pub struct EvalReport {
 }
 
 impl Individual {
-    pub fn random(cfg: &TrainConfig, rng: &mut impl Rng) -> Self {
-        let n = cfg.image_size * cfg.image_size;
+    pub fn random(cfg: &TrainConfig, input_bits: usize, rng: &mut impl Rng) -> Self {
         let enc_seed = rng.gen::<u64>();
         let dec_seed = rng.gen::<u64>();
         Self {
-            encoder: Circuit::random(n, cfg.encoder_gates, cfg.key_bits, cfg.gate_set, enc_seed),
-            decoder: Circuit::random(cfg.key_bits, cfg.decoder_gates, n, cfg.gate_set, dec_seed),
+            encoder: Circuit::random(
+                input_bits,
+                cfg.encoder_gates,
+                cfg.key_bits,
+                cfg.gate_set,
+                enc_seed,
+            ),
+            decoder: Circuit::random(
+                cfg.key_bits,
+                cfg.decoder_gates,
+                input_bits,
+                cfg.gate_set,
+                dec_seed,
+            ),
             fitness: f32::INFINITY,
             ber: 1.0,
+            color_mae: 1.0,
+            index_accuracy: 0.0,
             key_entropy: 0.0,
             key_uniqueness: 0.0,
             active_gates: 0,
@@ -55,6 +75,8 @@ impl Individual {
     fn apply(&mut self, report: &EvalReport) {
         self.fitness = report.fitness;
         self.ber = report.ber;
+        self.color_mae = report.color_mae;
+        self.index_accuracy = report.index_accuracy;
         self.key_entropy = report.key_entropy;
         self.key_uniqueness = report.key_uniqueness;
         self.active_gates = report.active_gates;
@@ -62,7 +84,12 @@ impl Individual {
 }
 
 /// Evaluate one individual on a fixed batch.
-pub fn evaluate(ind: &Individual, batch: &BitBatch, cfg: &TrainConfig) -> EvalReport {
+pub fn evaluate(
+    ind: &Individual,
+    batch: &BitBatch,
+    cfg: &TrainConfig,
+    dataset: &Dataset,
+) -> EvalReport {
     let mut enc_arena = Vec::new();
     let mut key_planes = Vec::new();
     ind.encoder
@@ -73,7 +100,20 @@ pub fn evaluate(ind: &Individual, batch: &BitBatch, cfg: &TrainConfig) -> EvalRe
     ind.decoder
         .eval_into(&key_planes, batch.words, &mut dec_arena, &mut recon);
 
-    report_from_planes(&recon, &key_planes, batch, cfg)
+    match dataset.color_mode {
+        ColorMode::Grayscale => report_from_planes(&recon, &key_planes, batch, cfg),
+        ColorMode::Palette => report_from_planes_color(&recon, &key_planes, batch, cfg, dataset),
+        ColorMode::Rgb1 => {
+            // For RGB 1-bit/channel, bit error and color error are the same
+            // quantity. Use the fast bit-parallel path during evolution;
+            // pixel accuracy is computed at evaluation time.
+            let mut report = report_from_planes(&recon, &key_planes, batch, cfg);
+            report.color_mae = report.ber;
+            report.color_mse = report.ber;
+            report.psnr = psnr_from_mse(report.ber);
+            report
+        }
+    }
 }
 
 fn report_from_planes(
@@ -87,22 +127,173 @@ fn report_from_planes(
     let ber = errors as f32 / denom;
     let entropy = key_entropy(key_planes, cfg.key_bits, batch.words, batch.len);
     let uniqueness = key_uniqueness(key_planes, cfg.key_bits, batch.words, batch.len);
-    let active = 0usize; // filled by the caller, which knows both circuits
     let fitness =
         ber + cfg.entropy_weight * (1.0 - entropy) + cfg.uniqueness_weight * (1.0 - uniqueness);
     EvalReport {
         fitness,
         ber,
+        ..Default::default()
+    }
+    .with_common(entropy, uniqueness, batch.len)
+}
+
+fn report_from_planes_color(
+    recon: &[u64],
+    key_planes: &[u64],
+    batch: &BitBatch,
+    cfg: &TrainConfig,
+    dataset: &Dataset,
+) -> EvalReport {
+    let (color_mae, color_mse, psnr, index_accuracy, exact_images) =
+        color_metrics(recon, batch, dataset);
+    let errors = plane_hamming(recon, &batch.planes, batch.cols, batch.words, batch.len);
+    let ber = errors as f32 / (batch.len.max(1) * batch.cols.max(1)) as f32;
+    let entropy = key_entropy(key_planes, cfg.key_bits, batch.words, batch.len);
+    let uniqueness = key_uniqueness(key_planes, cfg.key_bits, batch.words, batch.len);
+    let fitness = color_mae
+        + cfg.entropy_weight * (1.0 - entropy)
+        + cfg.uniqueness_weight * (1.0 - uniqueness);
+    EvalReport {
+        fitness,
+        ber,
+        color_mae,
+        color_mse,
+        psnr,
+        index_accuracy,
         key_entropy: entropy,
         key_uniqueness: uniqueness,
-        active_gates: active,
-        exact_rate: 0.0,
+        active_gates: 0,
+        exact_rate: exact_images as f32 / batch.len.max(1) as f32,
         n: batch.len,
     }
 }
 
-fn evaluate_individual(ind: &Individual, batch: &BitBatch, cfg: &TrainConfig) -> EvalReport {
-    let mut report = evaluate(ind, batch, cfg);
+impl EvalReport {
+    fn with_common(mut self, entropy: f32, uniqueness: f32, n: usize) -> Self {
+        self.key_entropy = entropy;
+        self.key_uniqueness = uniqueness;
+        self.n = n;
+        self
+    }
+}
+
+/// For RGB 1-bit/channel, bit error and color error are the same quantity.
+/// Index accuracy here means the fraction of pixels with all three channel
+/// bits correct.
+fn rgb1_metrics(recon: &[u64], batch: &BitBatch, dataset: &Dataset) -> (f32, f32, f32, f32, usize) {
+    let pixels = dataset.pixels();
+    let mut correct_pixels = 0usize;
+    let mut exact_images = 0usize;
+    for sample in 0..batch.len {
+        let word = sample / 64;
+        let bit = sample % 64;
+        let mut image_correct = 0usize;
+        for p in 0..pixels {
+            let mut pixel_ok = true;
+            for channel in 0..3 {
+                let col = channel * pixels + p;
+                let a = (recon[col * batch.words + word] >> bit) & 1;
+                let b = (batch.planes[col * batch.words + word] >> bit) & 1;
+                if a != b {
+                    pixel_ok = false;
+                }
+            }
+            if pixel_ok {
+                correct_pixels += 1;
+                image_correct += 1;
+            }
+        }
+        if image_correct == pixels {
+            exact_images += 1;
+        }
+    }
+    let n = (batch.len.max(1) * pixels.max(1)) as f64;
+    let index_accuracy = correct_pixels as f32 / n as f32;
+    let errors = plane_hamming(recon, &batch.planes, batch.cols, batch.words, batch.len);
+    let color_mae = errors as f32 / (batch.len.max(1) * batch.cols.max(1)) as f32;
+    let color_mse = color_mae;
+    (
+        color_mae,
+        color_mse,
+        psnr_from_mse(color_mse),
+        index_accuracy,
+        exact_images,
+    )
+}
+
+/// Compute color metrics by decoding each pixel's palette index and comparing
+/// it with the target palette index.
+fn color_metrics(
+    recon: &[u64],
+    batch: &BitBatch,
+    dataset: &Dataset,
+) -> (f32, f32, f32, f32, usize) {
+    let bpp = dataset.bits_per_pixel;
+    let pixels = dataset.pixels();
+    let palette = &dataset.palette;
+    let k = palette.len();
+    let mut mae_dist = vec![0.0f32; k * k];
+    let mut mse_dist = vec![0.0f32; k * k];
+    for a in 0..k {
+        for b in 0..k {
+            let dr = palette[a][0] as i32 - palette[b][0] as i32;
+            let dg = palette[a][1] as i32 - palette[b][1] as i32;
+            let db = palette[a][2] as i32 - palette[b][2] as i32;
+            mae_dist[a * k + b] = (dr.abs() + dg.abs() + db.abs()) as f32 / (3.0 * 255.0);
+            mse_dist[a * k + b] = (dr * dr + dg * dg + db * db) as f32 / (3.0 * 255.0 * 255.0);
+        }
+    }
+
+    let mut total_mae = 0.0f64;
+    let mut total_mse = 0.0f64;
+    let mut correct = 0usize;
+    let mut exact_images = 0usize;
+
+    for sample in 0..batch.len {
+        let row = batch.indices[sample];
+        let target = dataset.row_values(row);
+        let word = sample / 64;
+        let bit = sample % 64;
+        let mut image_correct = 0usize;
+        for (p, &target_index) in target.iter().enumerate().take(pixels) {
+            let mut decoded = 0usize;
+            for b in 0..bpp {
+                let plane = p * bpp + b;
+                let value = (recon[plane * batch.words + word] >> bit) & 1;
+                decoded |= (value as usize) << b;
+            }
+            let target_index = target_index as usize;
+            total_mae += mae_dist[target_index * k + decoded] as f64;
+            total_mse += mse_dist[target_index * k + decoded] as f64;
+            if decoded == target_index {
+                correct += 1;
+                image_correct += 1;
+            }
+        }
+        if image_correct == pixels {
+            exact_images += 1;
+        }
+    }
+
+    let n = (batch.len.max(1) * pixels.max(1)) as f64;
+    let mae = (total_mae / n) as f32;
+    let mse = (total_mse / n) as f32;
+    (
+        mae,
+        mse,
+        psnr_from_mse(mse),
+        correct as f32 / n as f32,
+        exact_images,
+    )
+}
+
+fn evaluate_individual(
+    ind: &Individual,
+    batch: &BitBatch,
+    cfg: &TrainConfig,
+    dataset: &Dataset,
+) -> EvalReport {
+    let mut report = evaluate(ind, batch, cfg, dataset);
     let active = ind.encoder.active_gates() + ind.decoder.active_gates();
     let total = (cfg.encoder_gates + cfg.decoder_gates).max(1) as f32;
     report.active_gates = active;
@@ -110,9 +301,14 @@ fn evaluate_individual(ind: &Individual, batch: &BitBatch, cfg: &TrainConfig) ->
     report
 }
 
-fn evaluate_all(population: &mut [Individual], batch: &BitBatch, cfg: &TrainConfig) {
+fn evaluate_all(
+    population: &mut [Individual],
+    batch: &BitBatch,
+    cfg: &TrainConfig,
+    dataset: &Dataset,
+) {
     population.par_iter_mut().for_each(|ind| {
-        let report = evaluate_individual(ind, batch, cfg);
+        let report = evaluate_individual(ind, batch, cfg, dataset);
         ind.apply(&report);
     });
 }
@@ -151,10 +347,6 @@ fn key_entropy(planes: &[u64], key_bits: usize, words: usize, len: usize) -> f32
 }
 
 /// Fraction of distinct keys in the batch, capped at `2^key_bits`.
-///
-/// This rewards an encoder that actually uses the key space. For a linear
-/// subspace toy it directly rewards an injective encoder, which is the
-/// prerequisite for the decoder to reconstruct held-out combinations.
 fn key_uniqueness(planes: &[u64], key_bits: usize, words: usize, len: usize) -> f32 {
     if key_bits == 0 || len == 0 {
         return 0.0;
@@ -289,13 +481,15 @@ fn crossover(a: &Individual, b: &Individual, rng: &mut impl Rng) -> Individual {
         decoder: crossover_circuit(&a.decoder, &b.decoder, rng),
         fitness: f32::INFINITY,
         ber: 1.0,
+        color_mae: 1.0,
+        index_accuracy: 0.0,
         key_entropy: 0.0,
         key_uniqueness: 0.0,
         active_gates: 0,
     }
 }
 
-pub fn to_model(ind: &Individual, cfg: &TrainConfig, val: &EvalReport) -> Model {
+pub fn to_model(ind: &Individual, cfg: &TrainConfig, val: &EvalReport, dataset: &Dataset) -> Model {
     Model::new(
         ModelConfig {
             image_size: cfg.image_size,
@@ -304,6 +498,10 @@ pub fn to_model(ind: &Individual, cfg: &TrainConfig, val: &EvalReport) -> Model 
             binarize: cfg.binarize,
             threshold: cfg.threshold,
             seed: cfg.seed,
+            color_mode: dataset.color_mode,
+            palette: dataset.palette.clone(),
+            bits_per_pixel: dataset.bits_per_pixel,
+            channels: dataset.channels,
         },
         ind.encoder.clone(),
         ind.decoder.clone(),
@@ -313,20 +511,33 @@ pub fn to_model(ind: &Individual, cfg: &TrainConfig, val: &EvalReport) -> Model 
             test_ber: 0.0,
             key_entropy: ind.key_entropy,
             active_gates: ind.active_gates,
+            color_mae: val.color_mae,
+            color_mse: val.color_mse,
+            psnr: val.psnr,
+            index_accuracy: val.index_accuracy,
         },
     )
 }
 
 pub fn run_ga(dataset: &Dataset, cfg: &TrainConfig, out_dir: &Path) -> Result<Individual> {
     cfg.validate()?;
-    if dataset.cols() != cfg.image_size * cfg.image_size {
+    if dataset.size != cfg.image_size {
         bail!(
-            "dataset has {} bits per image but config says {}x{}",
-            dataset.cols(),
+            "dataset is {}x{} but config says {}x{}",
+            dataset.size,
+            dataset.size,
             cfg.image_size,
             cfg.image_size
         );
     }
+    if cfg.key_bits >= dataset.cols() {
+        bail!(
+            "key_bits ({}) must be smaller than the input size ({} bits)",
+            cfg.key_bits,
+            dataset.cols()
+        );
+    }
+    let input_bits = dataset.cols();
 
     fs::create_dir_all(out_dir)
         .with_context(|| format!("creating run directory {}", out_dir.display()))?;
@@ -344,30 +555,32 @@ pub fn run_ga(dataset: &Dataset, cfg: &TrainConfig, out_dir: &Path) -> Result<In
     let train_batch = BitBatch::from_matrix(&dataset.bits, &train_indices);
     let val_batch = BitBatch::from_matrix(&dataset.bits, &val_indices);
     eprintln!(
-        "dataset: {} images ({} train / {} val / {} test), train batch {}, val batch {}",
+        "dataset: {} images ({} train / {} val / {} test), {} bits/image, {} bits/pixel, train batch {}, val batch {}",
         dataset.n,
         train_pool.len(),
         val_pool.len(),
         test_pool.len(),
+        dataset.cols(),
+        dataset.bits_per_pixel,
         train_indices.len(),
         val_indices.len()
     );
 
     let mut population: Vec<Individual> = (0..cfg.population)
-        .map(|_| Individual::random(cfg, &mut rng))
+        .map(|_| Individual::random(cfg, input_bits, &mut rng))
         .collect();
-    evaluate_all(&mut population, &train_batch, cfg);
+    evaluate_all(&mut population, &train_batch, cfg, dataset);
     population.sort_by(|a, b| a.fitness.total_cmp(&b.fitness));
 
     let mut best = population[0].clone();
-    let mut best_val = evaluate_individual(&best, &val_batch, cfg);
+    let mut best_val = evaluate_individual(&best, &val_batch, cfg, dataset);
     let mut stagnation = 0usize;
 
     let log_file = File::create(out_dir.join("log.csv"))?;
     let mut log = BufWriter::new(log_file);
     writeln!(
         log,
-        "gen,best_fitness,mean_fitness,best_ber,val_ber,key_entropy,key_uniqueness,active_gates,elapsed_ms"
+        "gen,best_fitness,mean_fitness,best_ber,val_ber,val_color_mae,val_index_accuracy,key_entropy,key_uniqueness,active_gates,elapsed_ms"
     )?;
 
     for gen in 0..cfg.generations {
@@ -385,7 +598,7 @@ pub fn run_ga(dataset: &Dataset, cfg: &TrainConfig, out_dir: &Path) -> Result<In
             offspring.push(child);
         }
 
-        evaluate_all(&mut offspring, &train_batch, cfg);
+        evaluate_all(&mut offspring, &train_batch, cfg, dataset);
         population.extend(offspring);
         population.sort_by(|a, b| a.fitness.total_cmp(&b.fitness));
         population.truncate(cfg.population);
@@ -399,19 +612,21 @@ pub fn run_ga(dataset: &Dataset, cfg: &TrainConfig, out_dir: &Path) -> Result<In
         }
 
         if gen % cfg.val_every == 0 || gen + 1 == cfg.generations {
-            best_val = evaluate_individual(&best, &val_batch, cfg);
+            best_val = evaluate_individual(&best, &val_batch, cfg, dataset);
         }
 
         if cfg.log_every > 0 && (gen % cfg.log_every == 0 || gen + 1 == cfg.generations) {
             let mean = population.iter().map(|i| i.fitness).sum::<f32>() / population.len() as f32;
             writeln!(
                 log,
-                "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}",
+                "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}",
                 gen,
                 best.fitness,
                 mean,
                 best.ber,
                 best_val.ber,
+                best_val.color_mae,
+                best_val.index_accuracy,
                 best.key_entropy,
                 best.key_uniqueness,
                 best.active_gates,
@@ -420,7 +635,7 @@ pub fn run_ga(dataset: &Dataset, cfg: &TrainConfig, out_dir: &Path) -> Result<In
         }
 
         if cfg.checkpoint_every > 0 && gen > 0 && gen % cfg.checkpoint_every == 0 {
-            let model = to_model(&best, cfg, &best_val);
+            let model = to_model(&best, cfg, &best_val, dataset);
             fs::write(
                 out_dir.join("model.json"),
                 model.to_json().map_err(anyhow::Error::msg)?,
@@ -431,23 +646,29 @@ pub fn run_ga(dataset: &Dataset, cfg: &TrainConfig, out_dir: &Path) -> Result<In
             let n = (cfg.population / 10).max(1);
             for i in 0..n {
                 let idx = cfg.population - 1 - i;
-                population[idx] = Individual::random(cfg, &mut rng);
+                population[idx] = Individual::random(cfg, input_bits, &mut rng);
             }
             let start = cfg.population - n;
-            evaluate_all(&mut population[start..], &train_batch, cfg);
+            evaluate_all(&mut population[start..], &train_batch, cfg, dataset);
             population.sort_by(|a, b| a.fitness.total_cmp(&b.fitness));
             stagnation = 0;
         }
     }
 
-    let test_indices = sample_indices(&mut rng, &test_pool, cfg.val_batch);
-    let test_batch = BitBatch::from_matrix(&dataset.bits, &test_indices);
-    let test_report = evaluate_individual(&best, &test_batch, cfg);
-
-    let mut model = to_model(&best, cfg, &best_val);
-    model.metrics.test_ber = test_report.ber;
+    let full_test = if test_pool.is_empty() {
+        val_pool.clone()
+    } else {
+        test_pool.clone()
+    };
+    let mut model = to_model(&best, cfg, &best_val, dataset);
+    let full_report = evaluate_model(&model, dataset, &full_test)?;
+    model.metrics.test_ber = full_report.ber;
     model.metrics.key_entropy = best.key_entropy;
     model.metrics.active_gates = best.active_gates;
+    model.metrics.color_mae = full_report.color_mae;
+    model.metrics.color_mse = full_report.color_mse;
+    model.metrics.psnr = full_report.psnr;
+    model.metrics.index_accuracy = full_report.index_accuracy;
     fs::write(
         out_dir.join("model.json"),
         model.to_json().map_err(anyhow::Error::msg)?,
@@ -458,10 +679,23 @@ pub fn run_ga(dataset: &Dataset, cfg: &TrainConfig, out_dir: &Path) -> Result<In
     )?;
     log.flush()?;
 
-    eprintln!(
-        "done: train BER {:.4}, val BER {:.4}, test BER {:.4}, key entropy {:.3}, active gates {}",
-        best.ber, best_val.ber, test_report.ber, best.key_entropy, best.active_gates
-    );
+    if dataset.color_mode != ColorMode::Grayscale {
+        eprintln!(
+            "done: color MAE {:.4}, PSNR {:.2} dB, pixel accuracy {:.2}%, bit BER {:.4}, val color MAE {:.4}, test color MAE {:.4}, active gates {}",
+            best.color_mae,
+            full_report.psnr,
+            full_report.index_accuracy * 100.0,
+            best.ber,
+            best_val.color_mae,
+            full_report.color_mae,
+            best.active_gates
+        );
+    } else {
+        eprintln!(
+            "done: train BER {:.4}, val BER {:.4}, test BER {:.4}, key entropy {:.3}, active gates {}",
+            best.ber, best_val.ber, full_report.ber, best.key_entropy, best.active_gates
+        );
+    }
     Ok(best)
 }
 
@@ -488,9 +722,32 @@ pub fn evaluate_model(model: &Model, dataset: &Dataset, indices: &[usize]) -> Re
     let entropy = key_entropy(&key_planes, model.config.key_bits, batch.words, batch.len);
     let uniqueness = key_uniqueness(&key_planes, model.config.key_bits, batch.words, batch.len);
     let exact = exact_matches(&recon, &batch);
+
+    let (color_mae, color_mse, psnr, index_accuracy) = match dataset.color_mode {
+        ColorMode::Palette => {
+            let (mae, mse, psnr, accuracy, _) = color_metrics(&recon, &batch, dataset);
+            (mae, mse, psnr, accuracy)
+        }
+        ColorMode::Rgb1 => {
+            let (mae, mse, psnr, accuracy, _) = rgb1_metrics(&recon, &batch, dataset);
+            (mae, mse, psnr, accuracy)
+        }
+        ColorMode::Grayscale => (0.0, 0.0, 0.0, 0.0),
+    };
+
+    let fitness = if dataset.color_mode == ColorMode::Grayscale {
+        ber
+    } else {
+        color_mae
+    };
+
     Ok(EvalReport {
-        fitness: ber,
+        fitness,
         ber,
+        color_mae,
+        color_mse,
+        psnr,
+        index_accuracy,
         key_entropy: entropy,
         key_uniqueness: uniqueness,
         active_gates: model.encoder.active_gates() + model.decoder.active_gates(),

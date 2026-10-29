@@ -218,6 +218,25 @@ button:focus,
   aspect-ratio: 1;
 }
 
+.colorgrid {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  max-width: 320px;
+  aspect-ratio: 1;
+}
+
+.colorcell {
+  aspect-ratio: 1;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  transition: box-shadow 120ms ease;
+}
+
+.colorcell.changed {
+  box-shadow: 0 0 0 2px var(--warn);
+}
+
 .bit {
   aspect-ratio: 1;
   border-radius: 2px;
@@ -303,6 +322,10 @@ button:focus,
   }
 
   .bitgrid {
+    max-width: 100%;
+  }
+
+  .colorgrid {
     max-width: 100%;
   }
 }

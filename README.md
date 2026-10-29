@@ -295,10 +295,11 @@ Dither baselines for the 1-bit dithered representation:
 | Toy 8×8 strict XOR | 1-bit threshold | 4 bits | 0.0000 | 0.0000 | 0.0000 (11/11 exact) | 128+128 gates |
 | CIFAR strict XOR | dither | 32 bits | 0.4402 | 0.4826 | 0.4811 | 432 active gates; does not reach the greedy linear basis |
 | CIFAR XOR+AND | dither | 32 bits | 0.4086 | 0.4412 | 0.4418 | 368 active gates; slightly worse than the greedy basis |
-| CIFAR XOR+AND | threshold | 32 bits | 0.2236 | 0.2241 | **0.2285** | 283 active gates; 0.30% exact; best result |
+| CIFAR XOR+AND | threshold | 32 bits | 0.2236 | 0.2241 | **0.2285** | 283 active gates; 0.30% exact; best grayscale result |
+| CIFAR RGB1 color | RGB 1-bit/channel | 128 bits | 0.1676 | 0.1714 | **0.1729** | 577 active gates; 64.06% pixel accuracy; 8-color posterization |
 
-The **threshold XOR+AND model** is the current web demo model. The dither run
-and strict-XOR model remain selectable as controls.
+The **RGB1 color model** is the current web demo model. The threshold,
+dither, strict-XOR, and toy models remain selectable for comparison.
 
 ### Binarization ablation
 
@@ -322,6 +323,29 @@ images and roughly halves the test BER. This motivates the next experiment:
 quantized value encodings (Gray or thermometer) with a larger key, so the model
 reconstructs intensities rather than a noisy 1-bit pattern.
 
+### Color experiment
+
+The first color attempt used a **16-color global palette**, with each pixel
+encoded as a 4-bit index. It did not generalize: index accuracy stayed at chance
+(~6.3%) and test color MAE was ~0.273. Treating color as a categorical palette
+index made the loss landscape too flat for the GA.
+
+**RGB 1-bit/channel** works much better. The image is three binary channel
+planes (8 colors total), 768 input bits, a 128-bit key, 577 active gates, and
+30,000 generations:
+
+- **Test color MAE: 0.1729** (normalized mean absolute RGB error)
+- **Pixel accuracy: 64.06%**
+- PSNR: 7.62 dB
+- The reconstruction is a posterized, somewhat speckled color thumbnail; see
+  `runs/cats16-rgb1-final/recon.png`.
+
+The web demo now defaults to this RGB1 model. The preview is the 32×32 RGB
+source image; the model input and reconstruction are 16×16 color grids.
+
+Next: **YCbCr 4:2:0** — full-resolution luma with subsampled chroma — should
+produce smoother color and less speckle than three independent RGB thresholds.
+
 ## Known limitations
 
 - Strict XOR cannot learn nonlinear structure; this is a theorem, not a tuning
@@ -331,6 +355,9 @@ reconstructs intensities rather than a noisy 1-bit pattern.
 - CIFAR cats are 32×32 and cluttered; 16×16 binarized reconstructions are
   meant to be diagnostic, not photorealistic.
 - The web app runs inference only. Training stays in the native CLI.
+- RGB1 color is 8-color posterization and still speckled. It is a first color
+  result, not photo-like. The 16-color palette encoding remains a negative
+  experiment; YCbCr 4:2:0 is the planned next step.
 - Solid 2.0 is pinned to a release candidate (`2.0.0-rc.19`). The app uses only
   stable core primitives, but the dependency is pre-1.0-stable by definition.
 
