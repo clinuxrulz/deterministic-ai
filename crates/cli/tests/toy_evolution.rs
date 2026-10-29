@@ -80,7 +80,10 @@ fn ga_is_deterministic_for_a_fixed_seed() {
 
 #[test]
 fn bundled_toy_model_loads_and_reconstructs_held_out_patterns() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../web/public/models/toy.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../web/public/models/toy.json"
+    );
     let json = std::fs::read_to_string(path).unwrap();
     let model = Model::from_json(&json).unwrap();
     assert_eq!(model.config.image_size, 8);

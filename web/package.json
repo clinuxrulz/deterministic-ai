@@ -1,0 +1,23 @@
+{
+  "name": "xorae-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wasm": "bash ../scripts/build-wasm.sh",
+    "predev": "npm run wasm",
+    "dev": "vite",
+    "prebuild": "npm run wasm",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@solidjs/web": "2.0.0-rc.19",
+    "solid-js": "2.0.0-rc.19"
+  },
+  "devDependencies": {
+    "@solidjs/vite-plugin": "3.0.0-next.52",
+    "typescript": "5.9.2",
+    "vite": "8.3.5"
+  }
+}

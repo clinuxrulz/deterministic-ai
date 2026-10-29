@@ -133,7 +133,7 @@ fn fill_block(canvas: &mut RgbImage, x0: u32, y0: u32, scale: u32, color: Rgb<u8
 }
 
 /// Write individual sample PNGs and a `samples/index.json` manifest for the
-/// Leptos gallery.
+/// web gallery.
 pub fn export_samples(
     dataset: &Dataset,
     indices: &[usize],

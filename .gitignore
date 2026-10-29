@@ -16,24 +16,21 @@ flamegraph.svg
 /runs/
 *.log
 
-# Leptos / Trunk / cargo-leptos build output
+# Web build output (Solid + Vite + wasm-pack)
 /dist/
 /pkg/
-/crates/web/pkg/
-/crates/web/dist/
-/crates/web/target/
+/web/node_modules/
+/web/dist/
+/web/.vite/
+/web/src/wasm/pkg/
 
 # Generated web assets (regenerate with `xorae export` / `xorae export-samples`)
-/crates/web/public/models/*.json
-!/crates/web/public/models/index.json
-!/crates/web/public/models/toy.json
-/crates/web/public/samples/*.png
-!/crates/web/public/samples/toy-*.png
-!/crates/web/public/samples/index.json
-/public/models/*.json
-/public/samples/
-!/public/models/.gitkeep
-!/public/samples/.gitkeep
+/web/public/models/*.json
+!/web/public/models/index.json
+!/web/public/models/toy.json
+/web/public/samples/*.png
+!/web/public/samples/toy-*.png
+!/web/public/samples/index.json
 
 # Local environment / secrets
 .env

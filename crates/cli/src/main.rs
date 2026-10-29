@@ -107,7 +107,7 @@ enum CliCommand {
         data: Option<PathBuf>,
         #[arg(long)]
         toy: bool,
-        #[arg(long, default_value = "crates/web/public")]
+        #[arg(long, default_value = "web/public")]
         out: PathBuf,
         #[arg(long, default_value_t = 8)]
         count: usize,

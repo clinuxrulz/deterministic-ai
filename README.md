@@ -38,13 +38,15 @@ proof and the implications.
   `rayon`, filesystem, or image-decoding dependencies.
 - **`crates/cli` (`xorae`)** — CIFAR-10 loader, toy linear-subspace generator,
   genetic algorithm, baselines, rendering, and model/sample export.
-- **`crates/web` (`xorae-web`)** — Leptos CSR demo: upload an image or pick a
+- **`crates/wasm` (`xorae-wasm`)** — a small `wasm-bindgen` bridge over
+  `xorae-core`: model parsing, image preprocessing, encode and decode.
+- **`web/`** — Solid 2.0 + Vite single-page demo: upload an image or pick a
   sample, run the model in the browser, inspect the key, flip key bits, and see
   the reconstruction and changed pixels.
 - **Tests** — proof-by-execution that XOR-only circuits are affine, bit-parallel
   evaluator equivalence, toy convergence and generalisation, and GA determinism.
 
-A bundled toy model (`crates/web/public/models/toy.json`) reconstructs all 11
+A bundled toy model (`web/public/models/toy.json`) reconstructs all 11
 held-out patterns of its 4-dimensional GF(2) subspace exactly.
 
 ## Layout
@@ -53,11 +55,11 @@ held-out patterns of its 4-dimensional GF(2) subspace exactly.
 crates/
   core/        xorae-core — shared inference, WASM-safe
   cli/         xorae — training, datasets, baselines, export
-  web/         xorae-web — Leptos CSR demo
+  wasm/        xorae-wasm — wasm-bindgen bridge
+web/           Solid 2.0 + Vite SPA, model/sample assets, WASM package output
 configs/       toy / CIFAR strict-XOR / CIFAR XOR+AND
-scripts/       fetch_cifar10.sh
+scripts/       fetch_cifar10.sh, build-wasm.sh
 docs/          linearity notes and experiment design
-public/        legacy placeholder for exported assets
 ```
 
 ## Quick start: toy (no download)
@@ -125,28 +127,44 @@ cargo run -p xorae -- render --model runs/cats16-xor/model.json \
 
 ## Web demo
 
+The web app is a Solid 2.0 SPA. Rust remains the numeric core, compiled to WASM
+through `wasm-pack`.
+
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install trunk
+cargo install wasm-pack     # if it is not already installed
 
-cd crates/web
-trunk serve --open
+cd web
+npm install
+npm run dev                 # predev builds web/src/wasm/pkg, then starts Vite
 ```
+
+For a production static build:
+
+```bash
+cd web
+npm run build               # runs wasm-pack, wasm-opt, then vite build
+npm run preview
+```
+
+The static site is written to `web/dist/`. The build script is
+`scripts/build-wasm.sh`; it outputs the generated JS/TS/WASM package to
+`web/src/wasm/pkg/` (gitignored).
 
 The app loads the bundled toy model and 8 toy samples. To add trained cat models:
 
 ```bash
 cargo run -p xorae -- export \
   --model runs/cats16-xor-and/model.json \
-  --out crates/web/public/models/cats16-xor-and.json
+  --out web/public/models/cats16-xor-and.json
 
 cargo run -p xorae -- export-samples \
-  --data data/cats16.bin --out crates/web/public \
+  --data data/cats16.bin --out web/public \
   --count 8 --prefix cat
 ```
 
-The manifest is `crates/web/public/models/index.json`. The app also works with
-`cargo leptos serve -p xorae-web`; the package metadata is included.
+The manifest is `web/public/models/index.json`. Solid is pinned to
+`2.0.0-rc.19`; the app uses the client-only Vite mode (no SSR).
 
 ## Commands
 
@@ -213,19 +231,23 @@ The workspace is configured to keep build artifacts and the deployed bundle smal
 - Dev builds use line-table debug info (`[profile.dev] debug = 1`). Set it to
   `0` if you do not need a debugger and want the smallest `target/`.
 - Release builds strip debug info.
-- Build the web app with `trunk build --release`; Trunk runs `wasm-opt` and
-  currently produces roughly a 450 KB WASM file, plus ~38 KB JS and ~5 KB CSS.
+- The web build runs `wasm-pack` + `wasm-opt` and Vite. The current release
+  bundle is roughly **137 KB WASM** (64 KB gzip), **50 KB JS** (19 KB gzip), and
+  **4 KB CSS**.
 
-With those settings, a cold `cargo test --workspace` plus `trunk build --release`
-produced a ~1.7 GB `target/` directory (down from ~5.6 GB). `target/` is
-disposable and gitignored — `cargo clean` removes it entirely.
+With those settings, `cargo test --workspace` plus `npm run build` produced a
+**~1.2 GB** `target/` (down from ~5.6 GB before the PNG/debug changes). The
+deployed `web/dist/` is about **272 KB total**. `target/` is disposable and
+gitignored — `cargo clean` removes it entirely.
 
 ## Tests
 
 ```bash
-cargo test -p xorae-core
-cargo test -p xorae
-cargo check -p xorae-web --target wasm32-unknown-unknown
+cargo test --workspace
+cargo check -p xorae-wasm --target wasm32-unknown-unknown
+
+cd web
+npm run build
 ```
 
 The core tests include:
@@ -236,6 +258,7 @@ The core tests include:
   two `u64` words.
 - `tests/toy_evolution.rs` — the GA learns a linear subspace, generalises to
   held-out XOR combinations, and is deterministic.
+- `crates/wasm` — binarize-mode parsing and the bridge surface.
 
 ## Results so far
 
@@ -257,6 +280,8 @@ completed. Add them here (and in `docs/experiment.md`) when available.
 - CIFAR cats are 32×32 and cluttered; 16×16 binarized reconstructions are
   meant to be diagnostic, not photorealistic.
 - The web app runs inference only. Training stays in the native CLI.
+- Solid 2.0 is pinned to a release candidate (`2.0.0-rc.19`). The app uses only
+  stable core primitives, but the dependency is pre-1.0-stable by definition.
 
 ## Dataset
 
