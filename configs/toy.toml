@@ -1,0 +1,29 @@
+# Small strict-XOR smoke test.
+# The toy images live in a 4-dimensional GF(2) subspace, so a perfect
+# strict-XOR autoencoder exists. Use this to validate the evaluator and GA.
+image_size = 8
+key_bits = 4
+encoder_gates = 128
+decoder_gates = 128
+gate_set = "xor_only"
+binarize = "threshold"
+threshold = 128
+
+population = 128
+offspring = 128
+generations = 600
+tournament = 4
+mutation_rate = 0.02
+crossover_rate = 0.10
+
+train_batch = 16
+val_batch = 16
+entropy_weight = 0.05
+uniqueness_weight = 0.20
+parsimony_weight = 0.0
+
+seed = 42
+val_every = 20
+checkpoint_every = 100
+stagnation_limit = 150
+log_every = 1

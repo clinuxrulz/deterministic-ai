@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "id": "toy",
+      "name": "Toy 8×8 · strict XOR",
+      "path": "models/toy.json",
+      "description": "16 patterns from a 4-dimensional GF(2) subspace."
+    },
+    {
+      "id": "cats16-xor",
+      "name": "CIFAR cats 16×16 · strict XOR",
+      "path": "models/cats16-xor.json",
+      "description": "Linear-code baseline."
+    },
+    {
+      "id": "cats16-xor-and",
+      "name": "CIFAR cats 16×16 · XOR + AND",
+      "path": "models/cats16-xor-and.json",
+      "description": "XOR-dominant universal Boolean circuit."
+    }
+  ]
+}

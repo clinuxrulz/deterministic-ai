@@ -1,0 +1,28 @@
+# Fast CIFAR smoke test: smaller population, fewer gates and generations.
+# Use this to validate the data pipeline before committing to a full run.
+image_size = 16
+key_bits = 32
+encoder_gates = 256
+decoder_gates = 256
+gate_set = "xor_and"
+binarize = "dither"
+threshold = 128
+
+population = 64
+offspring = 64
+generations = 200
+tournament = 4
+mutation_rate = 0.015
+crossover_rate = 0.10
+
+train_batch = 256
+val_batch = 256
+entropy_weight = 0.05
+uniqueness_weight = 0.01
+parsimony_weight = 0.001
+
+seed = 42
+val_every = 20
+checkpoint_every = 50
+stagnation_limit = 100
+log_every = 10

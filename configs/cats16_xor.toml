@@ -1,0 +1,29 @@
+# Strict-XOR baseline on CIFAR-10 cats.
+# This circuit is affine over GF(2), so expect it to plateau near the best
+# linear-code reconstruction error. It is the control for the XOR+AND run.
+image_size = 16
+key_bits = 32
+encoder_gates = 512
+decoder_gates = 512
+gate_set = "xor_only"
+binarize = "dither"
+threshold = 128
+
+population = 96
+offspring = 96
+generations = 3000
+tournament = 4
+mutation_rate = 0.01
+crossover_rate = 0.10
+
+train_batch = 512
+val_batch = 512
+entropy_weight = 0.05
+uniqueness_weight = 0.01
+parsimony_weight = 0.001
+
+seed = 42
+val_every = 25
+checkpoint_every = 100
+stagnation_limit = 400
+log_every = 1

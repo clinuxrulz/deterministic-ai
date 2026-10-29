@@ -1,0 +1,36 @@
+{
+  "samples": [
+    {
+      "name": "toy 0",
+      "path": "samples/toy-00.png"
+    },
+    {
+      "name": "toy 1",
+      "path": "samples/toy-01.png"
+    },
+    {
+      "name": "toy 2",
+      "path": "samples/toy-02.png"
+    },
+    {
+      "name": "toy 3",
+      "path": "samples/toy-03.png"
+    },
+    {
+      "name": "toy 4",
+      "path": "samples/toy-04.png"
+    },
+    {
+      "name": "toy 5",
+      "path": "samples/toy-05.png"
+    },
+    {
+      "name": "toy 6",
+      "path": "samples/toy-06.png"
+    },
+    {
+      "name": "toy 7",
+      "path": "samples/toy-07.png"
+    }
+  ]
+}
