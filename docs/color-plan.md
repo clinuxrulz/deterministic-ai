@@ -164,10 +164,13 @@ grayscale model.
 - Config: `configs/cats32_gray.toml`.
 - Data: `data/cats32_threshold.bin` (1,024 bits/image).
 - 128-bit key, 2,048+2,048 gates, 512-image batch, 30,000 generations.
-- Result: pending; see `runs/cats32-gray/`.
+- **Result: train 0.2030 / val 0.2058 / test BER 0.2097, 863 active gates,
+  0% exact.** Compare 16×16 threshold: 0.2285 test BER, 283 active gates.
 
-If it stays mush, the bottleneck is capacity/search rather than pixels, and
-Phase 4 is the right next move.
+Resolution gives a real but modest gain — about 40× the compute for an 8%
+relative BER improvement at the same compression ratio and gate-per-output
+budget. Large-scale structure and shading survive; fine detail does not. The run
+still uses only 21% of its gate budget, which reinforces Phase 4.
 
 ---
 

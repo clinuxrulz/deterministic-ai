@@ -135,3 +135,14 @@ of the current implementation.
     gates): test color MAE **0.1729**, pixel accuracy **64.06%**, PSNR 7.62 dB,
     577 active gates, 30,000 generations. The web demo defaults to this model.
   - Next: YCbCr 4:2:0 for smoother chroma.
+- Resolution (32×32 grayscale, 128-bit key, 2,048+2,048 gates, 30,000
+  generations): test BER **0.2097**, val 0.2058, 863 active gates, 0% exact.
+  Same 8× compression and same 4 gates per output bit as the 16×16 threshold
+  model (test BER 0.2285, 283 active gates, 3,000 generations). Native
+  resolution improves large-scale structure and shading but costs ~40× the
+  compute for an 8% relative gain, and 79% of the circuit stays inactive.
+  See `runs/cats32-gray/recon.png`.
+- Optimizer note: the greedy GF(2) baseline (0.3731) outperforms the
+  GA-evolved strict-XOR circuit (0.4811) on the same data, and both the 16×16
+  and 32×32 XOR+AND runs leave most gates inactive. The GA is a weak credit
+  assigner; see `docs/prior-art.md` and Phase 4 of `docs/color-plan.md`.

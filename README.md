@@ -295,11 +295,27 @@ Dither baselines for the 1-bit dithered representation:
 | Toy 8×8 strict XOR | 1-bit threshold | 4 bits | 0.0000 | 0.0000 | 0.0000 (11/11 exact) | 128+128 gates |
 | CIFAR strict XOR | dither | 32 bits | 0.4402 | 0.4826 | 0.4811 | 432 active gates; does not reach the greedy linear basis |
 | CIFAR XOR+AND | dither | 32 bits | 0.4086 | 0.4412 | 0.4418 | 368 active gates; slightly worse than the greedy basis |
-| CIFAR XOR+AND | threshold | 32 bits | 0.2236 | 0.2241 | **0.2285** | 283 active gates; 0.30% exact; best grayscale result |
+| CIFAR XOR+AND | threshold | 32 bits | 0.2236 | 0.2241 | **0.2285** | 283 active gates; 0.30% exact; best 16×16 grayscale result |
+| CIFAR XOR+AND 32×32 | threshold | 128 bits | 0.2030 | 0.2058 | **0.2097** | 863 active gates; native resolution; same 8× compression |
 | CIFAR RGB1 color | RGB 1-bit/channel | 128 bits | 0.1676 | 0.1714 | **0.1729** | 577 active gates; 64.06% pixel accuracy; 8-color posterization |
 
 The **RGB1 color model** is the current web demo model. The threshold,
 dither, strict-XOR, and toy models remain selectable for comparison.
+
+### Resolution ablation
+
+Same 8× compression ratio, same 4 gates per output bit, both runs converged:
+
+| Run | Input bits | Key | Gates | Generations | Test BER | Active gates |
+|---|---:|---:|---:|---:|---:|---:|
+| 16×16 threshold | 256 | 32 | 1,024 | 3,000 | 0.2285 | 283 |
+| 32×32 threshold | 1,024 | 128 | 4,096 | 30,000 | **0.2097** | 863 |
+
+Native resolution helps, but the return is poor: roughly **40× the compute for
+an 8% relative BER improvement**, and the run still leaves 79% of its gates
+inactive. Structure and large-scale shading now survive; fine detail does not.
+This is the main argument for changing the optimizer rather than the
+representation (see `docs/color-plan.md`, Phase 4).
 
 ### Binarization ablation
 
