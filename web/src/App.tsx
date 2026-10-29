@@ -171,7 +171,7 @@ export default function App() {
     const summary =
       handle.color_mode === "grayscale"
         ? `val BER ${(handle.val_ber * 100).toFixed(2)}%`
-        : `test color MAE ${(handle.test_color_mae * 100).toFixed(2)}%`;
+        : `abs MAE ${(handle.test_abs_mae * 100).toFixed(2)}%`;
     setStatus(`loaded ${entry.name} (${summary})`);
     return handle;
   }
@@ -310,7 +310,8 @@ export default function App() {
                 </>
               }
             >
-              <div><span>test color MAE</span><strong>{(current().test_color_mae * 100).toFixed(2)}%</strong></div>
+              <div><span>test abs MAE</span><strong>{(current().test_abs_mae * 100).toFixed(2)}%</strong></div>
+              <div><span>test palette MAE</span><strong>{(current().test_color_mae * 100).toFixed(2)}%</strong></div>
               <div><span>test PSNR</span><strong>{current().test_psnr.toFixed(2)} dB</strong></div>
               <div><span>pixel accuracy</span><strong>{(current().test_index_accuracy * 100).toFixed(2)}%</strong></div>
             </Show>

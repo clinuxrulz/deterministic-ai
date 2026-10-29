@@ -36,6 +36,8 @@ pub struct EvalReport {
     pub color_mse: f32,
     pub psnr: f32,
     pub index_accuracy: f32,
+    /// Mean absolute RGB error against the original image (colour only).
+    pub abs_mae: f32,
     pub key_entropy: f32,
     pub key_uniqueness: f32,
     pub active_gates: usize,
@@ -161,6 +163,7 @@ fn report_from_planes_color(
         color_mse,
         psnr,
         index_accuracy,
+        abs_mae: 0.0,
         key_entropy: entropy,
         key_uniqueness: uniqueness,
         active_gates: 0,
@@ -220,6 +223,41 @@ fn rgb1_metrics(recon: &[u64], batch: &BitBatch, dataset: &Dataset) -> (f32, f32
         index_accuracy,
         exact_images,
     )
+}
+
+/// Mean absolute RGB error between the reconstruction and the original image.
+///
+/// Both quantised-target metrics (`color_mae`) normalise against a different
+/// palette per mode, so they are not comparable across colour encodings. This
+/// measures against the unquantised source instead.
+fn abs_rgb_mae(
+    model: &Model,
+    dataset: &Dataset,
+    indices: &[usize],
+    recon: &[u64],
+    batch: &BitBatch,
+) -> f32 {
+    let cols = batch.cols;
+    let mut total = 0u64;
+    let mut fields = 0usize;
+    let mut bits = vec![0u8; cols];
+    for (sample, &index) in indices.iter().enumerate() {
+        let word = sample / 64;
+        let bit = sample % 64;
+        for (col, slot) in bits.iter_mut().enumerate() {
+            *slot = ((recon[col * batch.words + word] >> bit) & 1) as u8;
+        }
+        let rgb = model.bits_to_rgb(&bits);
+        let original = dataset.row_rgb(index);
+        for (a, b) in rgb.iter().zip(original.iter()) {
+            total += (*a as i32 - *b as i32).unsigned_abs() as u64;
+            fields += 1;
+        }
+    }
+    if fields == 0 {
+        return 0.0;
+    }
+    total as f32 / (fields as f32 * 255.0)
 }
 
 /// Compute color metrics for RGB-2 models by rebuilding each channel's 2-bit
@@ -571,6 +609,7 @@ pub fn to_model(ind: &Individual, cfg: &TrainConfig, val: &EvalReport, dataset: 
             color_mse: val.color_mse,
             psnr: val.psnr,
             index_accuracy: val.index_accuracy,
+            abs_mae: 0.0,
         },
     )
 }
@@ -779,6 +818,12 @@ pub fn evaluate_model(model: &Model, dataset: &Dataset, indices: &[usize]) -> Re
     let uniqueness = key_uniqueness(&key_planes, model.config.key_bits, batch.words, batch.len);
     let exact = exact_matches(&recon, &batch);
 
+    let abs_mae = if dataset.color_mode == ColorMode::Grayscale {
+        0.0
+    } else {
+        abs_rgb_mae(model, dataset, indices, &recon, &batch)
+    };
+
     let (color_mae, color_mse, psnr, index_accuracy) = match dataset.color_mode {
         ColorMode::Palette => {
             let (mae, mse, psnr, accuracy, _) = color_metrics(&recon, &batch, dataset);
@@ -808,6 +853,7 @@ pub fn evaluate_model(model: &Model, dataset: &Dataset, indices: &[usize]) -> Re
         color_mse,
         psnr,
         index_accuracy,
+        abs_mae,
         key_entropy: entropy,
         key_uniqueness: uniqueness,
         active_gates: model.encoder.active_gates() + model.decoder.active_gates(),

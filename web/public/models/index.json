@@ -7,10 +7,16 @@
       "description": "Best grayscale: 1,547 NAND gates after exact simplification (2,688 trained), 128-bit key, 8x compression, test BER 17.27%."
     },
     {
+      "id": "cats16-rgb2",
+      "name": "CIFAR cats 16×16 · RGB 2-bit/channel (64 colours)",
+      "path": "models/cats16-rgb2.json",
+      "description": "2-bit colour: 6 bit planes, 1,536 bits, 192-bit key, 8x compression. 2,345 NAND gates after exact simplification; abs MAE 23.61% vs the original image."
+    },
+    {
       "id": "cats16-rgb1",
       "name": "CIFAR cats 16×16 · RGB 1-bit/channel",
       "path": "models/cats16-rgb1.json",
-      "description": "Color experiment: 8-color RGB posterization, 128-bit key."
+      "description": "Color experiment: 8-colour RGB posterization, 128-bit key, 577 active gates; abs MAE 33.41% vs the original image."
     },
     {
       "id": "cats16-xor-and-threshold",

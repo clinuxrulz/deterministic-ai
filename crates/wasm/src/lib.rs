@@ -146,6 +146,12 @@ impl ModelHandle {
         self.inner.metrics.color_mae
     }
 
+    /// Mean absolute RGB error against the original image (colour models).
+    #[wasm_bindgen(getter)]
+    pub fn test_abs_mae(&self) -> f32 {
+        self.inner.metrics.abs_mae
+    }
+
     #[wasm_bindgen(getter)]
     pub fn test_psnr(&self) -> f32 {
         self.inner.metrics.psnr

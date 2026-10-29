@@ -33,6 +33,11 @@ described by its wiring.
 It is the default entry in `web/public/models/index.json` and is verified in a
 headless browser (128 key bits, 8 samples, no JS errors).
 
+The demo also ships **`cats16-rgb2`** (2-bit colour, 64 colours, 192-bit key,
+2,345 gates), verified the same way: 192 key bits, `abs MAE 23.61%`, zero
+console errors. Loading it requires the rebuilt wasm bundle — an older one
+cannot parse `ColorMode::Rgb2`.
+
 **Two gate counts, never mix them.** 1,547 is the number of literal NAND gates.
 986 is the AND-node count in an AIG view where inverted wires are free; in CMOS
 an inverter is *not* free, so 986 is a size metric for comparison with synthesis
@@ -209,11 +214,11 @@ Do not spend time re-running these.
 
 ## Open threads, in priority order
 
-1. **Colour, 2 bits/channel: done, not yet shipped to the demo.** `--rgb2`
-   gives 64 colours as six bit planes (1,536 bits, 192-bit key, 8×). Over six
-   paired seeds it cuts absolute reconstruction error by 33.7% for 1.91× the
-   gates. Not in `web/public/models/` yet: the wasm bundle needs rebuilding for
-   the new `rgb2` mode before the browser can load such a model.
+1. **Colour, 2 bits/channel: shipped.** `--rgb2` gives 64 colours as six bit
+   planes (1,536 bits, 192-bit key, 8×); over six paired seeds it cuts absolute
+   reconstruction error by 33.7% for 1.91× the gates. It is in the demo as
+   `cats16-rgb2`, and `eval` reports both `abs MAE vs original` and the
+   palette-relative MAE.
 2. **Gate removal for size.** Exact simplification (below) is done; the
    lossy frontier is not. Removing *active* gates with a tolerance gives a
    size-vs-BER curve, starting from 1,547 rather than 2,165. Nothing tried yet.

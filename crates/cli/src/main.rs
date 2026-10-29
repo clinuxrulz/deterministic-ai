@@ -110,6 +110,9 @@ enum CliCommand {
         toy: bool,
         #[arg(long, default_value = "test")]
         split: String,
+        /// Write the measured metrics back into the model JSON.
+        #[arg(long)]
+        update_metrics: bool,
     },
     /// Render original / binarized / reconstructed images to a PNG.
     Render {
@@ -389,11 +392,31 @@ fn main() -> Result<()> {
             data,
             toy,
             split,
+            update_metrics,
         } => {
-            let model = load_model(&model)?;
+            let model_path = model.clone();
+            let mut model = load_model(&model)?;
             let dataset = load_eval_dataset(data, toy, &model)?;
             let indices = split_indices(&dataset, model.config.seed, &split)?;
             let report = ga::evaluate_model(&model, &dataset, &indices)?;
+            if update_metrics {
+                model.metrics.active_gates =
+                    model.encoder.active_gates() + model.decoder.active_gates();
+                match split.as_str() {
+                    "test" => {
+                        model.metrics.test_ber = report.ber;
+                        model.metrics.abs_mae = absolute_mae(&model, &dataset, &indices)?;
+                        model.metrics.color_mae = report.color_mae;
+                        model.metrics.color_mse = report.color_mse;
+                        model.metrics.psnr = report.psnr;
+                        model.metrics.index_accuracy = report.index_accuracy;
+                    }
+                    "val" => model.metrics.val_ber = report.ber,
+                    _ => model.metrics.train_ber = report.ber,
+                }
+                std::fs::write(&model_path, model.to_json().map_err(anyhow::Error::msg)?)?;
+                println!("updated metrics in {}", model_path.display());
+            }
             if dataset.color_mode != ColorMode::Grayscale {
                 let abs_mae = absolute_mae(&model, &dataset, &indices)?;
                 println!(

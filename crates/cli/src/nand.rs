@@ -1169,6 +1169,11 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
     }
     let test_report = crate::ga::evaluate_model(&model, dataset, &test_pool)?;
     model.metrics.test_ber = test_report.ber;
+    model.metrics.abs_mae = test_report.abs_mae;
+    model.metrics.color_mae = test_report.color_mae;
+    model.metrics.color_mse = test_report.color_mse;
+    model.metrics.psnr = test_report.psnr;
+    model.metrics.index_accuracy = test_report.index_accuracy;
     model.metrics.active_gates = model.encoder.active_gates() + model.decoder.active_gates();
     std::fs::write(
         out_dir.join("model.json"),

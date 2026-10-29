@@ -52,6 +52,10 @@ pub struct ModelMetrics {
     pub psnr: f32,
     #[serde(default)]
     pub index_accuracy: f32,
+    /// Mean absolute RGB error against the *original* image (colour models).
+    /// Comparable across palettes, unlike `color_mae`.
+    #[serde(default)]
+    pub abs_mae: f32,
 }
 
 /// Portable inference model shared by the CLI and the browser.
