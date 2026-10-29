@@ -163,4 +163,17 @@ of the current implementation.
   - The residual discretisation gap comes from continuous activations at
     export time, not from the gate choice. Hardening only in the final few
     percent of epochs (`anneal_fraction`) is the mitigation under test.
+  - Best gate-type result: test BER 0.2523 (4 ops), which does **not** beat the
+    GA. Learned gate types are not where the win is.
+- NAND-only wiring search (`train-nand`). Every gate is NAND, so the gate type
+  carries no information and the circuit is entirely described by its wiring.
+  Each gate has 12 candidate input wires (9 local, 3 long-range); two candidate
+  softmaxes select its two inputs and anneal to one-hot.
+  - 20 epochs: test BER 0.1918.
+  - 200 epochs (final): **test BER 0.1727, val 0.1710**, 2,165 active gates of
+    2,688, 128-bit key, 8× compression.
+  - This beats the GA (0.2097) with 34% fewer gates and ~1% of the wall clock.
+  - Val BER bottomed at 0.1685 around epoch 125 and drifted up to 0.1710, so
+    the annealing schedule, not the epoch count, is the current limit.
+  - See `runs/nand32/recon.png`.
 

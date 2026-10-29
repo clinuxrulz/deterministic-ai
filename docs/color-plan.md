@@ -228,6 +228,22 @@ This is the one algorithmic change the adjacent literature suggests. Note that
 no published work appears to train a logic-gate *autoencoder* this way, so it is
 also the novel contribution.
 
+### Step B results — NAND-only wiring search wins
+
+The strongest result came from the most constrained formulation: make every
+gate NAND. `Nand` alone is functionally complete, so the gate type carries no
+information and the circuit is fully described by its wiring. That collapses
+the search to the wire list only.
+
+- 32×32 grayscale, 128-bit key, 2,688 NAND gates, 12 candidate wires per gate
+  (9 local + 3 long-range), 200 epochs.
+- **Test BER 0.1727**, val 0.1710, 2,165 active gates.
+- Baseline GA: 0.2097 with 4,096 gates.
+- Learned-gate-type gradient trainer: 0.2523. Gate-type freedom is *worse*
+  than the wiring-only search.
+
+This is the new best model and the direction Phase 2 (color) should reuse.
+
 ### Decision gate
 
 Take whichever trainer wins at the same bit budget, then re-run Phase 2 (YCbCr

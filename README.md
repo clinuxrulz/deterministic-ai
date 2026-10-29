@@ -296,11 +296,17 @@ Dither baselines for the 1-bit dithered representation:
 | CIFAR strict XOR | dither | 32 bits | 0.4402 | 0.4826 | 0.4811 | 432 active gates; does not reach the greedy linear basis |
 | CIFAR XOR+AND | dither | 32 bits | 0.4086 | 0.4412 | 0.4418 | 368 active gates; slightly worse than the greedy basis |
 | CIFAR XOR+AND | threshold | 32 bits | 0.2236 | 0.2241 | **0.2285** | 283 active gates; 0.30% exact; best 16×16 grayscale result |
-| CIFAR XOR+AND 32×32 | threshold | 128 bits | 0.2030 | 0.2058 | **0.2097** | 863 active gates; native resolution; same 8× compression |
+| CIFAR XOR+AND 32×32 | threshold | 128 bits | 0.2030 | 0.2058 | 0.2097 | 863 active gates; native resolution; same 8× compression |
+| **CIFAR NAND-only 32×32** | threshold | 128 bits | — | 0.1710 | **0.1727** | 2,165 active gates; every gate NAND; wiring is the only learned quantity |
 | CIFAR RGB1 color | RGB 1-bit/channel | 128 bits | 0.1676 | 0.1714 | **0.1729** | 577 active gates; 64.06% pixel accuracy; 8-color posterization |
 
-The **RGB1 color model** is the current web demo model. The threshold,
-dither, strict-XOR, and toy models remain selectable for comparison.
+The **NAND-only wiring-search model** is the best grayscale result. Every gate
+is NAND, so the circuit is fully described by its wiring: the trainer learns
+only which two wires each gate reads, with gradients over a softmax over
+candidate wires. `README` results are reproduced with `train-nand`.
+
+The **RGB1 color model** remains the web demo default. The threshold, dither,
+strict-XOR, and toy models remain selectable for comparison.
 
 ### Resolution ablation
 
