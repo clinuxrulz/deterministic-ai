@@ -204,6 +204,22 @@ strict-XOR run should plateau near it; that is the expected result, not a bug.
 - A test asserts that two runs with the same seed produce byte-identical model
   JSON.
 
+## Build footprint
+
+The workspace is configured to keep build artifacts and the deployed bundle small:
+
+- `image` is compiled with the PNG codec only. This removes the AVIF/JPEG/WebP/TIFF
+  codec stack from the build.
+- Dev builds use line-table debug info (`[profile.dev] debug = 1`). Set it to
+  `0` if you do not need a debugger and want the smallest `target/`.
+- Release builds strip debug info.
+- Build the web app with `trunk build --release`; Trunk runs `wasm-opt` and
+  currently produces roughly a 450 KB WASM file, plus ~38 KB JS and ~5 KB CSS.
+
+With those settings, a cold `cargo test --workspace` plus `trunk build --release`
+produced a ~1.7 GB `target/` directory (down from ~5.6 GB). `target/` is
+disposable and gitignored — `cargo clean` removes it entirely.
+
 ## Tests
 
 ```bash
