@@ -42,9 +42,14 @@ Re-running the same config on an 8-core machine reproduces the published
 number: test **0.1722**, val 0.1698, 2,170 active gates, 1m51s wall clock.
 
 The seed also selects the train/val/test split, so seed variance is the error
-bar for everything below. Measured over seeds 1, 2, 3, 42 on the default
-schedule: test BER **0.1720 ± 0.0015**. Treat anything smaller than ~0.005 as
-noise unless it clears this bar across ≥3 seeds.
+bar for everything below. Over seeds 0-4 the default config gives test BER
+**0.1730 ± 0.0066** (range 0.1657-0.1835; 95% CI of the mean ±0.0082), and a
+repeat run of seed 1 reproduces it bit-for-bit, so the spread is genuine
+split/init variance rather than run noise.
+
+A single run is therefore only good to about ±0.013 (2 sd). Compare
+configurations **paired on the same seed** — same seed means same split and same
+init — and treat anything under ~0.01 as unresolved.
 
 ## Setup on a fresh machine
 
@@ -190,8 +195,8 @@ Do not spend time re-running these.
 | Non-halving shape reductions (e.g. 192→128) | Strided windows cover the input poorly; colour at 6× (0.2539) was worse than 8× (0.2192) |
 | 512-bit keys | Theory says key size is not the limit (13 bits index 6,000 images) |
 | More capacity (4,736-gate wide model) | Test BER 0.1913 / val 0.1879 vs 0.1722 / 0.1698 narrow, despite lower train MSE (0.078 vs 0.095) — overfits. Confirmed twice, at `gain_end` 32 and 12 (0.2133) |
-| Softer anneal (`gain_end` 8/12/16) | Seed 42 looked like a win (0.1679 at `gain_end` 12) but was split luck: over seeds 1,2,3 it averages 0.1861 vs 0.1720 for `gain_end` 32, and its sd is 4-7× larger |
-| 300 epochs instead of 200 | 0.1674 vs 0.1679 on the same seed — within the 0.002 noise band. The default schedule has already converged by ~epoch 150 |
+| Softer anneal (`gain_end` 8/12/16) | No detectable effect. Seed 42 suggested 0.1679, but paired over seeds 0-4 the difference is +0.0063 ± 0.0113 (t(4)=1.24) and it doubles the spread |
+| 300 epochs instead of 200 | 0.1674 vs 0.1679 on the same seed — far inside the ±0.013 single-run noise band. The default schedule has already converged by ~epoch 150 |
 
 ## Open threads, in priority order
 
@@ -203,9 +208,11 @@ Do not spend time re-running these.
 2. **Gate removal for size.** Pruning dead gates is free. Removing *active*
    gates with a tolerance gives a size-vs-BER frontier, which is arguably the
    more interesting "tiny circuit" result. Nothing has been tried here yet.
-3. **Seed-averaged reporting.** Every number in this file is one seed except
-   the variance table above. Re-measuring the headline result over 5 seeds is
-   cheap (~10 min on 8 cores) and would make later comparisons trustworthy.
+3. **Seed-averaged reporting for everything else.** The default config now has
+   five seeds (0.1730 ± 0.0066) and runs are deterministic, so the harness is
+   established. Re-measure the colour and wide configs the same way (5 seeds,
+   paired) rather than as single runs — otherwise they repeat the `gain_end`
+   mistake.
 
 ## Gotchas
 

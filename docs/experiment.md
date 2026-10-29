@@ -251,20 +251,33 @@ anneal used to throw away.
 
 ### Seed variance
 
-The seed also chooses the train/val/test split, so it is the error bar for
-everything else. Seeds 1, 2, 3, 42:
+The seed also chooses the train/val/test split, so it sets the error bar for
+everything else. Default schedule (`gain_end` 32), seeds 0-4:
 
-| `gain_end` | s42 | s1 | s2 | s3 | Mean ± sd |
-|---|---|---|---|---|---|
-| 32 (default) | 0.1722 | 0.1700 | 0.1735 | 0.1724 | **0.1720 ± 0.0015** |
-| 12 | 0.1679 | 0.1800 | 0.1928 | 0.1856 | 0.1816 ± 0.0105 |
+| seed | 0 | 1 | 2 | 3 | 4 | mean ± sd |
+|---|---|---|---|---|---|---|
+| Test BER | 0.1657 | 0.1700 | 0.1735 | 0.1724 | 0.1835 | **0.1730 ± 0.0066** |
+| Val BER | 0.1655 | 0.1693 | 0.1711 | 0.1752 | 0.1857 | |
+| Active gates | 2,149 | 2,131 | 2,127 | 2,131 | 2,154 | |
 
-**Methodology finding: the seed-42 `gain_end = 12` result was split luck.** It
-sits 2.8 sd below the mean of the other three seeds. Over seeds 1-3 the softer
-schedule averages 0.1861 versus 0.1720 — worse, with sd 0.0064 vs 0.0015. Any
-single-seed win below ~0.005 is not a result.
+Repeat of seed 1 landed on 0.1700 / val 0.1693 / 2,131 gates again, so runs are
+deterministic: the spread is real split-and-init variance, not run noise. The
+95% CI of the mean is ±0.0082, and a single run is only good to about ±0.013.
 
-### Schedule sweep (seed 42, 200 epochs)
+**Correction to the first version of this note.** It claimed ±0.0015 from seeds
+1, 2, 3, 42. That was a small-sample artifact: seed 42 sits near the mean by
+luck, and seed 4 is 1.6 sd above it. The honest bar is ~4× wider. This is also
+why seed 42 is excluded from the table — it was chosen after seeing its result,
+so it is not a fair sample.
+
+Consequence: single-run comparisons at this scale are close to worthless for
+effects under ~0.01. Everything below is therefore **paired on seed** (same
+split, same init, only the knob under test differs).
+
+
+### Schedule: no detectable effect
+
+Exploratory sweep, seed 42 only, 200 epochs:
 
 | `gain_end` | Test BER | Val BER | Train MSE | Gates | Best epoch |
 |---|---|---|---|---|---|
@@ -273,10 +286,25 @@ single-seed win below ~0.005 is not a result.
 | 8 | 0.1706 | 0.1678 | 0.0916 | 2,174 | 199 |
 | 12 | 0.1679 | 0.1648 | 0.0922 | 2,174 | 199 |
 
-Read this table with the variance section above: only the seed-42 column exists
-here, and 12 is known to be an outlier. The one durable observation is
-mechanical — below `gain_end = 16` the anneal stops overshooting (best epoch
-becomes the last), above it the overshoot returns (best epoch 125).
+On that column lower gain looks like a win. It does not survive a paired
+comparison over seeds 0-4:
+
+| | mean | sd |
+|---|---|---|
+| `gain_end` 32 | 0.1730 | 0.0066 |
+| `gain_end` 12 | 0.1793 | 0.0123 |
+| Paired difference (12 − 32) | **+0.0063** | 0.0113 |
+
+Per-seed differences: −0.0059, +0.0100, +0.0193, +0.0132, −0.0053. Mean +0.0063,
+se 0.0051, t(4) = 1.24, 95% CI [−0.0078, +0.0203]. No effect on the mean, 12 wins
+on 2 of 5 seeds, and it roughly doubles the spread — a less stable schedule
+rather than a better one. The `gain_end` 8 and 16 rows have one seed each and
+are not evidence either way.
+
+The durable observation is mechanical: below `gain_end` ≈ 16 the anneal stops
+overshooting (best epoch becomes the last), above it the overshoot returns (best
+epoch 125). Checkpointing is what insulates the export from that difference, and
+it is worth ~0.002 val regardless of the schedule.
 
 ### Capacity: negative, twice
 
@@ -304,7 +332,13 @@ band.
 
 Nothing beat the default configuration. Published artifact stays
 `web/public/models/cats32-nand.json` (0.1727 / 2,165 gates). What changed is
-that the number is now reproducible, the exported weights are best-val rather
-than last-epoch, and the two threads the previous checkpoint left open —
-capacity and schedule — are both closed negative.
+that the number is now reproducible and has a measured error bar, the exported
+weights are best-val rather than last-epoch, capacity is closed negative, and
+the schedule knob has no detectable effect at this scale.
+
+Notable trap for the next agent: the seed-42 run at `gain_end` 12 reported
+0.1679 and looked like a 0.005 win against 0.1727. With five seeds the default
+config's own spread is 0.1657-0.1835, so that "win" was a draw from the same
+distribution. Ask for paired multi-seed comparisons before believing anything
+under ~0.01.
 
