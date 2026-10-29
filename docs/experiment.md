@@ -177,3 +177,48 @@ of the current implementation.
     the annealing schedule, not the epoch count, is the current limit.
   - See `runs/nand32/recon.png`.
 
+
+## Checkpoint (2026-10-29)
+
+Best model so far: **NAND-only 32×32 grayscale**
+
+- 2,165 NAND gates after dead-gate pruning (2,688 before).
+- 128-bit key, 8× compression, test BER **0.1727**, val 0.1710.
+- Live in the web demo as `web/public/models/cats32-nand.json` (default entry).
+
+### Reproduce
+
+```bash
+cargo run -p xorae -- preprocess \
+  --cifar-dir data/cifar-10-batches-bin \
+  --out data/cats32_threshold.bin --size 32 --binarize threshold
+
+cargo run --release -p xorae -- train-nand \
+  --config configs/cats32_nand.toml \
+  --data data/cats32_threshold.bin --out runs/nand32 --epochs 200
+```
+
+`RAYON_NUM_THREADS` controls worker threads. Results are identical for any
+thread count; 4 threads is ~2× faster than 1.
+
+### Open threads
+
+- **Capacity.** `configs/cats32_nand_wide.toml` (4,736 gates, same-resolution
+  layer) was stopped at ~epoch 180. At epoch 150 it had val BER 0.1918 versus
+  0.1772 for the narrow model at the same epoch, but a lower train MSE
+  (0.079 vs 0.095) — so it fits better and was still improving. Inconclusive;
+  needs a clean full run.
+- **Colour is encoding-limited.** RGB1 thresholds each channel at 128, so every
+  pixel snaps to one of 8 fully saturated colours. Muted browns and greys cannot
+  be represented at all. The recommended fix is 2 bits per channel (64 colours),
+  not a better search: 16×16 × 6 bits = 1,536 bits.
+- **Non-halving reductions hurt.** Colour at 6× compression (extra 192→128
+  step) scored 0.2539, worse than 8× at 0.2192. The strided window covers the
+  input poorly. Prefer shapes that halve.
+- **Polish does not generalise.** Greedy wire swaps improve their scoring sample
+  but not the test set; the gradient solution is already a single-wire local
+  optimum.
+- **Minimax does not apply.** The wiring search is single-agent; minimax needs an
+  adversary. It would only fit a robustness objective (worst-case wire faults).
+  MCTS over wire-swap moves is the correct "tree search" analogue, but the
+  polish result suggests search is not the bottleneck.
