@@ -279,8 +279,27 @@ impl Net {
 
 /// Derive an image shape for every layer by halving the longer axis.
 pub(crate) fn derive_shapes(side: usize, sizes: &[usize]) -> Result<Vec<(usize, usize)>> {
-    let mut shapes = vec![(side, side)];
-    let mut cur = (side, side);
+    derive_shapes_from((side, side), sizes)
+}
+
+/// Same as [`derive_shapes`] but starting from an arbitrary plane shape. This
+/// lets planar RGB data be treated as a tall image: 3 channels of `side x side`
+/// stack into a `3*side x side` plane.
+pub(crate) fn derive_shapes_from(
+    initial: (usize, usize),
+    sizes: &[usize],
+) -> Result<Vec<(usize, usize)>> {
+    if initial.0 * initial.1 != sizes[0] {
+        bail!(
+            "initial shape {}x{} has area {}, but the first layer width is {}",
+            initial.0,
+            initial.1,
+            initial.0 * initial.1,
+            sizes[0]
+        );
+    }
+    let mut shapes = vec![initial];
+    let mut cur = initial;
     for &target in &sizes[1..] {
         let area = cur.0 * cur.1;
         if target == area {

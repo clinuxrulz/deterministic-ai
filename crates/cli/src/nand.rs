@@ -29,7 +29,7 @@ use xorae_core::circuit::{Circuit, Gate, Op};
 use xorae_core::{BinarizeMode, GateSet, Model, ModelConfig, ModelMetrics};
 
 use crate::dataset::Dataset;
-use crate::grad::{derive_shapes, pick, window};
+use crate::grad::{derive_shapes_from, pick, window};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NandConfig {
@@ -37,6 +37,9 @@ pub struct NandConfig {
     pub key_bits: usize,
     /// Encoder hidden widths. The decoder mirrors them.
     pub hidden: Vec<usize>,
+    /// Input colour planes. 1 = grayscale, 3 = planar RGB.
+    #[serde(default = "default_channels")]
+    pub channels: usize,
     pub epochs: usize,
     pub batch: usize,
     pub lr: f32,
@@ -78,6 +81,9 @@ pub struct NandConfig {
     pub val_every: usize,
 }
 
+fn default_channels() -> usize {
+    1
+}
 fn default_n_local() -> usize {
     9
 }
@@ -171,11 +177,14 @@ struct Net {
 
 impl Net {
     fn build(cfg: &NandConfig, rng: &mut impl Rng) -> Result<Self> {
-        let n_inputs = cfg.image_size * cfg.image_size;
+        let side = cfg.image_size;
+        let n_inputs = side * side * cfg.channels.max(1);
         let mut sizes = vec![n_inputs];
         sizes.extend(cfg.hidden.iter().copied());
         sizes.push(cfg.key_bits);
-        let shapes = derive_shapes(cfg.image_size, &sizes)?;
+        // Planar colour data stacks into a tall image: 3 planes of side x side.
+        let initial = (side * cfg.channels.max(1), side);
+        let shapes = derive_shapes_from(initial, &sizes)?;
         let k = cfg.k();
 
         let mut layers = Vec::new();
@@ -824,12 +833,17 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
             cfg.image_size
         );
     }
-    if dataset.color_mode != xorae_core::ColorMode::Grayscale {
-        bail!("NAND trainer currently supports grayscale datasets only");
-    }
     let cols = dataset.cols();
-    if cols != cfg.image_size * cfg.image_size {
-        bail!("dataset has {cols} bits/image, expected a square image");
+    let expected = cfg.image_size * cfg.image_size * cfg.channels.max(1);
+    if cols != expected {
+        bail!("dataset has {cols} bits/image, config expects {expected}");
+    }
+    if dataset.channels != cfg.channels.max(1) {
+        bail!(
+            "dataset has {} channel(s), config says {}",
+            dataset.channels,
+            cfg.channels
+        );
     }
 
     std::fs::create_dir_all(out_dir)
@@ -1017,6 +1031,7 @@ mod tests {
             image_size: 8,
             key_bits: 8,
             hidden: vec![32, 16],
+            channels: 1,
             epochs: 1,
             batch: 2,
             lr: 0.01,
