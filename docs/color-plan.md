@@ -156,6 +156,114 @@ Options, in increasing cost:
 - Per-image palette or residual/second-stage chroma model.
 - Perceptual color loss (CIEDE2000) and post-hoc ordered dithering.
 
+**Chosen path: 32×32 grayscale first.** 16×16 is too coarse to judge by eye, and
+32×32 is CIFAR's native resolution. The grayscale run isolates resolution from
+color complexity at the same 8× compression ratio as the existing 16×16
+grayscale model.
+
+- Config: `configs/cats32_gray.toml`.
+- Data: `data/cats32_threshold.bin` (1,024 bits/image).
+- 128-bit key, 2,048+2,048 gates, 512-image batch, 30,000 generations.
+- Result: pending; see `runs/cats32-gray/`.
+
+If it stays mush, the bottleneck is capacity/search rather than pixels, and
+Phase 4 is the right next move.
+
+---
+
+## Phase 4 — fix the optimizer, not the representation
+
+**Motivation.** The 16×16 RGB1 model uses only **577 active gates out of a
+2,048+2,048 budget** — roughly 85% of the circuit is unused. Boolean
+autoencoder theory (Baldi 2012; arXiv:2004.09735) says a perfect autoencoder
+needs only `ceil(log2 n)` hidden bits, which is **13 bits for 6,000 cats**, not
+128. So key size is not the binding constraint; the search is. See
+`docs/prior-art.md` for the survey.
+
+Two steps, in order. Step A is cheap and stays inside the GA premise. Step B is
+the larger swing and is only justified if Step A stalls.
+
+### Step A — GA hardening (one run, ~3 small changes)
+
+Changes, all confined to `crates/cli/src/ga.rs` and the dataset layer:
+
+1. **Resample the training batch each generation.** Today fitness is computed on
+   one fixed 512-image set for all 30,000 generations. Resampling every
+   generation turns the objective into stochastic fitness and should shrink the
+   train/val gap.
+2. **Horizontal-flip augmentation.** Double effective data for free. Cats are
+   roughly symmetric enough that flips are label-preserving for reconstruction.
+   Applied identically to target and any cached planes.
+3. **Validation-based elitism.** Today `best` is *chosen* on the train batch and
+   only *reported* on val. Track a hall-of-fame entry selected on the val batch
+   and export that one.
+
+Optional if cheap: keep a hall-of-fame of neutral variants so drift can continue
+in flat regions (the standard CGP neutral-drift trick).
+
+**Acceptance:** run at 32×32 grayscale with the same key/gate budget and
+generations as Phase 3. Compare against the Phase 3 result.
+
+- If test BER / color MAE improves materially, the GA still has headroom and
+  Step B can wait.
+- If it barely moves, Step B is justified by evidence rather than assumption.
+
+### Step B — differentiable logic gate autoencoder (bounded prototype)
+
+Keep literal XOR/AND gates at **inference**, but find them with gradients.
+
+- Relax each gate to a soft gate (real-valued logic, as in Petersen et al.,
+  “Deep Differentiable Logic Gate Networks”, NeurIPS 2022).
+- Binary key: straight-through estimator or Gumbel-sigmoid.
+- Same data, image size, key width, and gate budget as the best GA run.
+- Train in a throwaway PyTorch prototype; do not port to Rust until it beats the
+  GA baseline.
+- Discretize to literal gates and export through the existing `Model` JSON so
+  the Rust core, WASM bridge, and Solid UI keep working unchanged.
+
+This is the one algorithmic change the adjacent literature suggests. Note that
+no published work appears to train a logic-gate *autoencoder* this way, so it is
+also the novel contribution.
+
+### Decision gate
+
+Take whichever trainer wins at the same bit budget, then re-run Phase 2 (YCbCr
+4:2:0) on top of it.
+
+### Explicitly rejected
+
+- **512-bit keys.** Theory says they do not help memorization at this dataset
+  size, and 512 UI toggles would wreck the demo.
+- **32/256-color palettes.** The 16-color categorical loss already sat at chance;
+  more categories makes the objective flatter, not better.
+- **Jumping straight to 32×32 color.** It confounds resolution, color, and
+  capacity in a single run.
+
+### Phase 4 checklist
+
+- [ ] Record the Phase 3 32×32 grayscale baseline (BER, exact rate, active gates).
+- [ ] Add per-generation batch resampling behind a config flag.
+- [ ] Add horizontal-flip augmentation.
+- [ ] Add validation-selected hall-of-fame export.
+- [ ] Run the hardened 32×32 baseline and compare.
+- [ ] If Step B is triggered: PyTorch DLGN autoencoder prototype.
+- [ ] Head-to-head BER comparison at equal gate budget.
+- [ ] If DLGN wins, discretize + export through `Model` JSON.
+- [ ] Update README and `docs/experiment.md` with the comparison.
+
+### Reproducible commands (Phase 4, Step A)
+
+```bash
+cargo run --release -p xorae -- train \
+  --config configs/cats32_gray_hardened.toml \
+  --data data/cats32_threshold.bin \
+  --out runs/cats32-gray-hardened
+
+cargo run -p xorae -- eval \
+  --model runs/cats32-gray-hardened/model.json \
+  --data data/cats32_threshold.bin --split test
+```
+
 ---
 
 ## Baselines and metrics
