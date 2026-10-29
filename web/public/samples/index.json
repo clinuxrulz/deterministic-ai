@@ -1,36 +1,36 @@
 {
   "samples": [
     {
-      "name": "toy 0",
-      "path": "samples/toy-00.png"
+      "name": "cat 0",
+      "path": "samples/cat-00.png"
     },
     {
-      "name": "toy 1",
-      "path": "samples/toy-01.png"
+      "name": "cat 1",
+      "path": "samples/cat-01.png"
     },
     {
-      "name": "toy 2",
-      "path": "samples/toy-02.png"
+      "name": "cat 2",
+      "path": "samples/cat-02.png"
     },
     {
-      "name": "toy 3",
-      "path": "samples/toy-03.png"
+      "name": "cat 3",
+      "path": "samples/cat-03.png"
     },
     {
-      "name": "toy 4",
-      "path": "samples/toy-04.png"
+      "name": "cat 4",
+      "path": "samples/cat-04.png"
     },
     {
-      "name": "toy 5",
-      "path": "samples/toy-05.png"
+      "name": "cat 5",
+      "path": "samples/cat-05.png"
     },
     {
-      "name": "toy 6",
-      "path": "samples/toy-06.png"
+      "name": "cat 6",
+      "path": "samples/cat-06.png"
     },
     {
-      "name": "toy 7",
-      "path": "samples/toy-07.png"
+      "name": "cat 7",
+      "path": "samples/cat-07.png"
     }
   ]
 }

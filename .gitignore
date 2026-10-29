@@ -28,8 +28,11 @@ flamegraph.svg
 /web/public/models/*.json
 !/web/public/models/index.json
 !/web/public/models/toy.json
+!/web/public/models/cats16-xor.json
+!/web/public/models/cats16-xor-and.json
 /web/public/samples/*.png
 !/web/public/samples/toy-*.png
+!/web/public/samples/cat-*.png
 !/web/public/samples/index.json
 
 # Local environment / secrets

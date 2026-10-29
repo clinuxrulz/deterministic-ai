@@ -110,4 +110,12 @@ of the current implementation.
 ## Status
 
 - Toy 8×8, 4-bit key, strict XOR: 0 BER, 11/11 held-out patterns exact.
-- CIFAR runs: pending completion of the dataset download and full training.
+- CIFAR-10 cats, 16×16, 32-bit key, 3,000 generations, seed 42:
+  - Best linear baseline (greedy GF(2) basis): **0.4358** test BER.
+  - Strict XOR: **0.4477** test BER (0.4448 val); 380 active gates.
+  - XOR+AND: **0.4214** test BER (0.4191 val); 347 active gates.
+- The XOR+AND circuit beats the best linear code by about 1.4 BER points. The
+  strict-XOR GA lands above the greedy basis, which is consistent with both the
+  linearity barrier and the limits of GA search on this objective.
+- Reconstructions are coarse at 16×16 with a 32-bit key. See
+  `runs/cats16-xor-and/recon.png` and the Solid demo in `web/`.

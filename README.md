@@ -262,14 +262,27 @@ The core tests include:
 
 ## Results so far
 
-| Run | Key | Train BER | Held-out BER | Notes |
-|---|---|---|---|---|
-| Toy 8×8 strict XOR | 4 bits | 0.0000 | 0.0000 (11/11 exact) | 128+128 gates, seed 42 |
-| CIFAR cats 16×16 strict XOR | 32 bits | — | — | Run the commands above |
-| CIFAR cats 16×16 XOR+AND | 32 bits | — | — | Run the commands above |
+CIFAR-10 cats, 16×16, 32-bit key, 512-image training batch, seed 42, 3,000
+generations. BER is bit error rate on the full 1,000-image test split unless
+noted.
 
-The CIFAR numbers are intentionally left blank until the full runs are
-completed. Add them here (and in `docs/experiment.md`) when available.
+| Baseline | Test BER |
+|---|---:|
+| All-zero | 0.4483 |
+| Per-bit majority | 0.4464 |
+| Top-K identity | 0.4440 |
+| Greedy GF(2) basis | **0.4358** |
+
+| Run | Key | Train BER | Val BER | Test BER | Notes |
+|---|---:|---:|---:|---:|---|
+| Toy 8×8 strict XOR | 4 bits | 0.0000 | 0.0000 | 0.0000 (11/11 exact) | 128+128 gates |
+| CIFAR strict XOR | 32 bits | 0.4180 | 0.4448 | 0.4477 | 380 active gates; does not reach the greedy linear basis |
+| CIFAR XOR+AND | 32 bits | 0.3927 | 0.4191 | **0.4214** | 347 active gates; beats the linear baseline by ~1.4 points |
+
+The XOR+AND model is the current demo model. Reconstructions are coarse — a
+32-bit key on 16×16 dithered cats is extremely lossy — but the nonlinear circuit
+does measurably better than the best linear code. See
+`runs/cats16-xor-and/recon.png` after running the commands above.
 
 ## Known limitations
 
