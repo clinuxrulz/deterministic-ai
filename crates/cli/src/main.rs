@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use xorae::config::TrainConfig;
 use xorae::dataset::Dataset;
-use xorae::{baselines, config, dataset, ga, render, toy};
+use xorae::{baselines, config, dataset, ga, grad, render, toy};
 use xorae_core::color::ColorMode;
 use xorae_core::preprocess::{BinarizeMode, PreprocessOptions};
 use xorae_core::Model;
@@ -67,6 +67,19 @@ enum CliCommand {
         seed: Option<u64>,
         #[arg(long)]
         generations: Option<usize>,
+    },
+    /// Train a fixed-topology gate network with gradients (soft gates + STE).
+    TrainGrad {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long, default_value = "runs/grad")]
+        out: PathBuf,
+        #[arg(long)]
+        seed: Option<u64>,
+        #[arg(long)]
+        epochs: Option<usize>,
     },
     /// Evaluate a saved model on train/val/test.
     Eval {
@@ -258,6 +271,34 @@ fn main() -> Result<()> {
                     best.ber
                 );
             }
+            Ok(())
+        }
+        CliCommand::TrainGrad {
+            config,
+            data,
+            out,
+            seed,
+            epochs,
+        } => {
+            let mut cfg = grad::GradConfig::from_toml(&config)?;
+            if let Some(seed) = seed {
+                cfg.seed = seed;
+            }
+            if let Some(epochs) = epochs {
+                cfg.epochs = epochs;
+            }
+            cfg.validate()?;
+            let dataset = Dataset::load(&data)?;
+            println!(
+                "training gradient gate net: {}x{}, {}-bit key, {} epochs (seed {})",
+                cfg.image_size, cfg.image_size, cfg.key_bits, cfg.epochs, cfg.seed
+            );
+            let model = grad::run_grad(&dataset, &cfg, &out)?;
+            println!(
+                "model written to {} (test BER {:.4})",
+                out.join("model.json").display(),
+                model.metrics.test_ber
+            );
             Ok(())
         }
         CliCommand::Eval {

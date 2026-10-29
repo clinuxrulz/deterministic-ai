@@ -1,0 +1,40 @@
+# Gradient-trained gate autoencoder: universal gate set, 32x32 grayscale.
+#
+# Encoder: 32x32 -> 32x32 -> 16x32 -> 16x16 -> 8x16 (128-bit key)
+# Adds a same-resolution refinement layer before pooling.
+# Decoder: mirror. Total 2,688 literal gates, each chosen from
+# {XOR, XNOR, AND, NAND, OR, NOR}. NAND and NOR are each functionally complete.
+#
+# No XOR-dominance constraint: forcing a mostly-XOR circuit drives the search
+# to chance (test BER 0.499), because XOR-only is linear over GF(2).
+image_size = 32
+key_bits = 128
+hidden = [1024, 512, 256]
+
+epochs = 300
+batch = 64
+lr = 0.01
+
+# Activations stay continuous; a soft penalty pushes them toward 0/1 so the
+# exported literal circuit matches the trained model.
+squash = "none"
+binarize_weight = 0.05
+
+# Gate softmax sharpens over most of the run so `argmax` is meaningful.
+gate_gain_start = 2.0
+gate_gain_end = 64.0
+gate_anneal_fraction = 0.9
+
+# 30% of gates read an earlier layer (skip connections);
+# 25% of gate inputs are drawn globally; the rest stay spatially local.
+global_mix = 0.25
+skip_prob = 0.30
+key_balance_weight = 0.05
+
+# No gate-mix cap.
+and_budget = 1.0
+and_penalty_weight = 0.0
+
+seed = 42
+log_every = 10
+val_every = 25

@@ -146,3 +146,21 @@ of the current implementation.
   GA-evolved strict-XOR circuit (0.4811) on the same data, and both the 16×16
   and 32×32 XOR+AND runs leave most gates inactive. The GA is a weak credit
   assigner; see `docs/prior-art.md` and Phase 4 of `docs/color-plan.md`.
+- Gradient trainer (`train-grad`, fixed hierarchical wiring, learned gate
+  types, soft gates with an annealed gate softmax). Findings:
+  - Backprop is correct: with continuous activations the network fits the
+    training set (MSE 0.25 → 0.14 in 25 epochs).
+  - **Binarising activations during training does not work.** Hard
+    binarisation with an identity straight-through estimator collapses to
+    predicting the per-pixel mean (MSE ~0.22, BER 0.50). A sigmoid-temperature
+    interpolant is worse: it keeps every activation in roughly `[0.38, 0.62]`,
+    which compounds across layers until the signal is gone.
+  - A linear→hard blend interpolant (`(1-λ)·z + λ·step(z)`) preserves the range
+    but still fails to learn once λ reaches 1.
+  - Keeping activations continuous while annealing the *gate* softmax to
+    one-hot does learn, and the exported literal circuit is far from chance.
+    This is the working configuration.
+  - The residual discretisation gap comes from continuous activations at
+    export time, not from the gate choice. Hardening only in the final few
+    percent of epochs (`anneal_fraction`) is the mitigation under test.
+

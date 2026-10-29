@@ -11,7 +11,9 @@ pub enum Op {
     Xor,
     Xnor,
     And,
+    Nand,
     Or,
+    Nor,
     Not,
 }
 
@@ -22,7 +24,9 @@ impl Op {
             Op::Xor => a ^ b,
             Op::Xnor => !(a ^ b),
             Op::And => a & b,
+            Op::Nand => !(a & b),
             Op::Or => a | b,
+            Op::Nor => !(a | b),
             Op::Not => !a,
         }
     }
@@ -57,6 +61,9 @@ pub enum GateSet {
     XorAnd,
     /// All available operations, with XOR still weighted heavily.
     Full,
+    /// Every binary operation, uniformly. `Nand` and `Nor` alone are
+    /// functionally complete, so this contains universal gate sets.
+    Universal,
 }
 
 impl GateSet {
@@ -73,16 +80,35 @@ impl GateSet {
                 }
             }
             GateSet::Full => {
-                if r < 0.65 {
+                if r < 0.45 {
                     Op::Xor
-                } else if r < 0.75 {
+                } else if r < 0.55 {
                     Op::Xnor
-                } else if r < 0.88 {
+                } else if r < 0.68 {
                     Op::And
-                } else if r < 0.96 {
+                } else if r < 0.78 {
+                    Op::Nand
+                } else if r < 0.90 {
                     Op::Or
+                } else if r < 0.97 {
+                    Op::Nor
                 } else {
                     Op::Not
+                }
+            }
+            GateSet::Universal => {
+                if r < 1.0 / 6.0 {
+                    Op::Xor
+                } else if r < 2.0 / 6.0 {
+                    Op::Xnor
+                } else if r < 3.0 / 6.0 {
+                    Op::And
+                } else if r < 4.0 / 6.0 {
+                    Op::Nand
+                } else if r < 5.0 / 6.0 {
+                    Op::Or
+                } else {
+                    Op::Nor
                 }
             }
         }
@@ -312,6 +338,10 @@ mod tests {
         assert_eq!(Op::Xor.apply(1, 0), 1);
         assert_eq!(Op::Xor.apply(1, 1), 0);
         assert_eq!(Op::And.apply(1, 1), 1);
+        assert_eq!(Op::Nand.apply(1, 1) & 1, 0);
+        assert_eq!(Op::Nand.apply(1, 0) & 1, 1);
+        assert_eq!(Op::Nor.apply(0, 0) & 1, 1);
+        assert_eq!(Op::Nor.apply(0, 1) & 1, 0);
         assert_eq!(Op::Not.apply(0, 0), u64::MAX);
     }
 
