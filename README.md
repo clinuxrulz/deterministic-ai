@@ -263,8 +263,10 @@ The core tests include:
 ## Results so far
 
 CIFAR-10 cats, 16×16, 32-bit key, 512-image training batch, seed 42, 3,000
-generations. BER is bit error rate on the full 1,000-image test split unless
-noted.
+generations. Train BER is on the 512-image training batch; validation and test
+BER are on the full 1,001 / 1,000 image splits.
+
+Dither baselines for the original 1-bit representation:
 
 | Baseline | Test BER |
 |---|---:|
@@ -273,16 +275,38 @@ noted.
 | Top-K identity | 0.4440 |
 | Greedy GF(2) basis | **0.4358** |
 
-| Run | Key | Train BER | Val BER | Test BER | Notes |
-|---|---:|---:|---:|---:|---|
-| Toy 8×8 strict XOR | 4 bits | 0.0000 | 0.0000 | 0.0000 (11/11 exact) | 128+128 gates |
-| CIFAR strict XOR | 32 bits | 0.4180 | 0.4448 | 0.4477 | 380 active gates; does not reach the greedy linear basis |
-| CIFAR XOR+AND | 32 bits | 0.3927 | 0.4191 | **0.4214** | 347 active gates; beats the linear baseline by ~1.4 points |
+| Run | Encoding | Key | Train BER | Val BER | Test BER | Notes |
+|---|---|---:|---:|---:|---:|---|
+| Toy 8×8 strict XOR | 1-bit threshold | 4 bits | 0.0000 | 0.0000 | 0.0000 (11/11 exact) | 128+128 gates |
+| CIFAR strict XOR | dither | 32 bits | 0.4180 | 0.4448 | 0.4477 | 380 active gates; does not reach the greedy linear basis |
+| CIFAR XOR+AND | dither | 32 bits | 0.3927 | 0.4191 | 0.4214 | 347 active gates; beats the linear baseline by ~1.4 points |
+| CIFAR XOR+AND | threshold | 32 bits | 0.2126 | 0.2117 | **0.2134** | 292 active gates; 0.70% exact; same config, only preprocessing changed |
 
-The XOR+AND model is the current demo model. Reconstructions are coarse — a
-32-bit key on 16×16 dithered cats is extremely lossy — but the nonlinear circuit
-does measurably better than the best linear code. See
-`runs/cats16-xor-and/recon.png` after running the commands above.
+The dither XOR+AND model is the current web demo model. The threshold run is
+substantially better and is the obvious next demo export.
+
+### Binarization ablation
+
+With the same XOR+AND config, key size, and generations, changing only the
+preprocessing has a large effect:
+
+| Binarization | Test BER | Exact match | Active gates |
+|---|---:|---:|---:|
+| Floyd–Steinberg dither | 0.4214 | 0.00% | 347 |
+| Threshold | **0.2134** | 0.70% | 292 |
+| Otsu | not trained | — | — |
+
+Threshold baselines are also stronger than dither baselines: all-zero `0.3967`,
+per-bit majority `0.3948`, top-K identity `0.3871`, greedy GF(2) basis `0.4074`.
+The threshold model at `0.2134` is well below all of them, so the gain is not
+just a change in bit density.
+
+**Current observation:** the representation matters more than the gate set right
+now. Dithering encodes intensity as high-frequency noise that a ~292-active-gate
+circuit cannot reconstruct. Thresholding produces simpler, more structured
+images and roughly halves the test BER. This motivates the next experiment:
+quantized value encodings (Gray or thermometer) with a larger key, so the model
+reconstructs intensities rather than a noisy 1-bit pattern.
 
 ## Known limitations
 
