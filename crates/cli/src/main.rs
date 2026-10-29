@@ -93,6 +93,9 @@ enum CliCommand {
         seed: Option<u64>,
         #[arg(long)]
         epochs: Option<usize>,
+        /// Override the candidate-softmax anneal endpoint (config `gain_end`).
+        #[arg(long)]
+        gain_end: Option<f32>,
     },
     /// Evaluate a saved model on train/val/test.
     Eval {
@@ -320,6 +323,7 @@ fn main() -> Result<()> {
             out,
             seed,
             epochs,
+            gain_end,
         } => {
             let mut cfg = nand::NandConfig::from_toml(&config)?;
             if let Some(seed) = seed {
@@ -328,11 +332,14 @@ fn main() -> Result<()> {
             if let Some(epochs) = epochs {
                 cfg.epochs = epochs;
             }
+            if let Some(gain_end) = gain_end {
+                cfg.gain_end = gain_end;
+            }
             cfg.validate()?;
             let dataset = Dataset::load(&data)?;
             println!(
-                "training NAND wiring: {}x{}, {}-bit key, {} epochs (seed {})",
-                cfg.image_size, cfg.image_size, cfg.key_bits, cfg.epochs, cfg.seed
+                "training NAND wiring: {}x{}, {}-bit key, {} epochs (seed {}, gain_end {})",
+                cfg.image_size, cfg.image_size, cfg.key_bits, cfg.epochs, cfg.seed, cfg.gain_end
             );
             let model = nand::run_nand(&dataset, &cfg, &out)?;
             println!(

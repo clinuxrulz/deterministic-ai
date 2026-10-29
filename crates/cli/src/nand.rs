@@ -984,6 +984,13 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
     let mut key_totals = vec![0f32; trainer.net.key_bits];
     let mut key_mean = vec![0f32; trainer.net.key_bits];
 
+    // Validation BER is evaluated every `val_every` epochs. Keep the wire
+    // logits of the best one: the anneal overshoots, so the last epoch is
+    // usually worse than the best one, and exporting the last epoch throws
+    // that away. Selection is on val only; test stays untouched.
+    let mut best_val = f32::INFINITY;
+    let mut best_snapshot: Option<(Vec<f32>, Vec<f32>, usize)> = None;
+
     let log_file = File::create(out_dir.join("log.csv"))?;
     let mut log = BufWriter::new(log_file);
     writeln!(log, "epoch,step,train_mse,elapsed_ms,gain")?;
@@ -1075,14 +1082,29 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
             let (encoder, decoder) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
             let model = make_model(dataset, cfg, encoder, decoder);
             if let Ok(report) = crate::ga::evaluate_model(&model, dataset, &val_pool) {
+                let improved = report.ber + 1e-9 < best_val;
                 eprintln!(
-                    "epoch {epoch}: train MSE {:.5}, gain {:.1}, val BER {:.4}",
-                    mean, trainer.gain, report.ber
+                    "epoch {epoch}: train MSE {:.5}, gain {:.1}, val BER {:.4}{}",
+                    mean,
+                    trainer.gain,
+                    report.ber,
+                    if improved { " (new best)" } else { "" }
                 );
+                if improved {
+                    best_val = report.ber;
+                    best_snapshot = Some((trainer.alpha.clone(), trainer.beta.clone(), epoch));
+                }
             }
         }
     }
     log.flush()?;
+
+    if let Some((alpha, beta, epoch)) = best_snapshot {
+        trainer.alpha = alpha;
+        trainer.beta = beta;
+        trainer.refresh_probs();
+        eprintln!("restored best-val checkpoint from epoch {epoch} (val BER {best_val:.4})");
+    }
 
     let (mut encoder, mut decoder) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
     if cfg.polish_sweeps > 0 {

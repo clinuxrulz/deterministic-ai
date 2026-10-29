@@ -203,11 +203,6 @@ thread count; 4 threads is ~2× faster than 1.
 
 ### Open threads
 
-- **Capacity.** `configs/cats32_nand_wide.toml` (4,736 gates, same-resolution
-  layer) was stopped at ~epoch 180. At epoch 150 it had val BER 0.1918 versus
-  0.1772 for the narrow model at the same epoch, but a lower train MSE
-  (0.079 vs 0.095) — so it fits better and was still improving. Inconclusive;
-  needs a clean full run.
 - **Colour is encoding-limited.** RGB1 thresholds each channel at 128, so every
   pixel snaps to one of 8 fully saturated colours. Muted browns and greys cannot
   be represented at all. The recommended fix is 2 bits per channel (64 colours),
@@ -222,3 +217,94 @@ thread count; 4 threads is ~2× faster than 1.
   adversary. It would only fit a robustness objective (worst-case wire faults).
   MCTS over wire-swap moves is the correct "tree search" analogue, but the
   polish result suggests search is not the bottleneck.
+
+## Checkpoint 2 (2026-10-29): checkpointing, variance, capacity
+
+Two trainer changes and one methodology finding.
+
+Trainer changes (`crates/cli/src/nand.rs`, `crates/cli/src/main.rs`):
+
+- **Best-val checkpointing.** The wire logits of the best validation BER are
+  snapshotted and restored before polish/prune/export. Previously the exported
+  model was the *last* epoch, which is why the earlier log recorded val BER
+  improving to 0.1685 and then "drifting" to 0.1710: the better weights were
+  simply discarded. Selection uses val only, so test is untouched.
+- **`--gain-end` override** on `train-nand`, plus `configs/cats32_nand.toml`
+  pinned to `epochs = 200` (it said 300 while the documented run passed
+  `--epochs 200`).
+
+Hardware note: 8 cores, 200 epochs in **1m51s**. The old "~8 min" figure was 4
+cores, so that is 4.3× faster on 2× the threads — the earlier number may have
+been measured under thermal throttling or alongside other work.
+
+### Reproduction (seed 42, 200 epochs)
+
+| Metric | Documented | Re-run |
+|---|---|---|
+| Test BER | 0.1727 | **0.1722** |
+| Val BER | 0.1710 | 0.1698 (restored epoch 125; last epoch was 0.1717) |
+| Active gates | 2,165 | 2,170 |
+| Wall clock | ~8 min | 1m51s |
+
+Reproduces within noise, and the checkpoint restore recovers the 0.002 val the
+anneal used to throw away.
+
+### Seed variance
+
+The seed also chooses the train/val/test split, so it is the error bar for
+everything else. Seeds 1, 2, 3, 42:
+
+| `gain_end` | s42 | s1 | s2 | s3 | Mean ± sd |
+|---|---|---|---|---|---|
+| 32 (default) | 0.1722 | 0.1700 | 0.1735 | 0.1724 | **0.1720 ± 0.0015** |
+| 12 | 0.1679 | 0.1800 | 0.1928 | 0.1856 | 0.1816 ± 0.0105 |
+
+**Methodology finding: the seed-42 `gain_end = 12` result was split luck.** It
+sits 2.8 sd below the mean of the other three seeds. Over seeds 1-3 the softer
+schedule averages 0.1861 versus 0.1720 — worse, with sd 0.0064 vs 0.0015. Any
+single-seed win below ~0.005 is not a result.
+
+### Schedule sweep (seed 42, 200 epochs)
+
+| `gain_end` | Test BER | Val BER | Train MSE | Gates | Best epoch |
+|---|---|---|---|---|---|
+| 32 | 0.1722 | 0.1698 | 0.0946 | 2,170 | 125 |
+| 16 | 0.1710 | 0.1686 | 0.0933 | 2,190 | 125 |
+| 8 | 0.1706 | 0.1678 | 0.0916 | 2,174 | 199 |
+| 12 | 0.1679 | 0.1648 | 0.0922 | 2,174 | 199 |
+
+Read this table with the variance section above: only the seed-42 column exists
+here, and 12 is known to be an outlier. The one durable observation is
+mechanical — below `gain_end = 16` the anneal stops overshooting (best epoch
+becomes the last), above it the overshoot returns (best epoch 125).
+
+### Capacity: negative, twice
+
+| Model | `gain_end` | Gates trained → active | Test BER | Val BER | Train MSE |
+|---|---|---|---|---|---|
+| Narrow | 32 | 2,688 → 2,170 | 0.1722 | 0.1698 | 0.0946 |
+| Wide | 32 | 4,736 → 3,085 | 0.1913 | 0.1879 | 0.0783 |
+| Wide | 12 | 4,736 → 3,193 | 0.2133 | 0.2113 | 0.0759 |
+
+The wide model fits the training set substantially better and generalises
+substantially worse. More capacity is not the constraint; the earlier
+"inconclusive" run was heading to this answer. It also overshoots harder: at
+`gain_end` 32 the best val is epoch 175 (0.1879) and then rises to 0.1984 at
+epoch 199; at `gain_end` 12 the best is epoch 125 (0.2113) and it climbs to
+0.2314 — the opposite of the narrow model, where lower gain stopped the
+overshoot.
+
+### Training length: no effect
+
+`gain_end` 12, 300 epochs, seed 42: test 0.1674 / val 0.1654 versus 0.1679 /
+0.1648 at 200 epochs. Same seed, same split, difference inside the 0.002 noise
+band.
+
+### Net position
+
+Nothing beat the default configuration. Published artifact stays
+`web/public/models/cats32-nand.json` (0.1727 / 2,165 gates). What changed is
+that the number is now reproducible, the exported weights are best-val rather
+than last-epoch, and the two threads the previous checkpoint left open —
+capacity and schedule — are both closed negative.
+

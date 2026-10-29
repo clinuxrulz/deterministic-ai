@@ -36,6 +36,16 @@ For comparison: the genetic algorithm reached test BER 0.2097 with 4,096
 XOR+AND gates. Gradient-trained *gate types* (non-NAND) only reached 0.2523, so
 restricting to NAND and learning only wiring is what produced the win.
 
+### Reproduction and seed variance (2026-10-29)
+
+Re-running the same config on an 8-core machine reproduces the published
+number: test **0.1722**, val 0.1698, 2,170 active gates, 1m51s wall clock.
+
+The seed also selects the train/val/test split, so seed variance is the error
+bar for everything below. Measured over seeds 1, 2, 3, 42 on the default
+schedule: test BER **0.1720 ± 0.0015**. Treat anything smaller than ~0.005 as
+noise unless it clears this bar across ≥3 seeds.
+
 ## Setup on a fresh machine
 
 ```bash
@@ -82,10 +92,24 @@ cargo run --release -p xorae -- train-nand \
   --data data/cats32_threshold.bin --out runs/nand32 --epochs 200
 ```
 
-Takes ~8 minutes on 4 cores. Always use `--release`; debug is far too slow.
+Takes ~8 minutes on 4 cores, ~2 minutes on 8. Always use `--release`; debug is
+far too slow.
 
 `RAYON_NUM_THREADS` controls workers. The result is identical for any thread
 count (verified 1 vs 4 workers); 4 is ~2× faster than 1.
+
+`--seed` and `--epochs` override the config, and `--gain-end` overrides the
+anneal endpoint, so experiments need no new TOML files:
+
+```bash
+cargo run --release -p xorae -- train-nand --config configs/cats32_nand.toml \
+  --data data/cats32_threshold.bin --out runs/sweep_g8 --gain-end 8 --seed 1
+```
+
+The trainer snapshots the wire logits at the best validation BER and restores
+them before polish/prune/export, so the exported model is the best-val epoch,
+not the last one. The `log.csv` and stdout still show every epoch, and the
+restore line names the epoch that won.
 
 Then evaluate, render, and export:
 
@@ -144,6 +168,10 @@ cargo run --release -p xorae -- export \
   split is mathematically exact.
 - After training: greedy wire-swap polish (optional, default 2 sweeps) and
   dead-gate pruning.
+- The wire logits of the best-val epoch are snapshotted every `val_every`
+  epochs and restored before polish/export. Selection is on val only, so test
+  stays clean; at `gain_end = 32` this recovers ~0.002 val that the anneal
+  otherwise overshoots.
 
 ## What has been ruled out (with evidence)
 
@@ -161,25 +189,23 @@ Do not spend time re-running these.
 | Minimax | Not applicable — single-agent problem, no adversary. MCTS is the correct analogue |
 | Non-halving shape reductions (e.g. 192→128) | Strided windows cover the input poorly; colour at 6× (0.2539) was worse than 8× (0.2192) |
 | 512-bit keys | Theory says key size is not the limit (13 bits index 6,000 images) |
+| More capacity (4,736-gate wide model) | Test BER 0.1913 / val 0.1879 vs 0.1722 / 0.1698 narrow, despite lower train MSE (0.078 vs 0.095) — overfits. Confirmed twice, at `gain_end` 32 and 12 (0.2133) |
+| Softer anneal (`gain_end` 8/12/16) | Seed 42 looked like a win (0.1679 at `gain_end` 12) but was split luck: over seeds 1,2,3 it averages 0.1861 vs 0.1720 for `gain_end` 32, and its sd is 4-7× larger |
+| 300 epochs instead of 200 | 0.1674 vs 0.1679 on the same seed — within the 0.002 noise band. The default schedule has already converged by ~epoch 150 |
 
 ## Open threads, in priority order
 
-1. **Capacity.** `configs/cats32_nand_wide.toml` adds a same-resolution 32×32
-   layer (4,736 gates, same 8× ratio). One run was stopped at ~epoch 180 and
-   was inconclusive: at epoch 150 it had val BER 0.1918 vs 0.1772 for the narrow
-   model, but a lower train MSE (0.079 vs 0.095) and was still improving. Needs
-   a clean full run.
-2. **Colour is encoding-limited, not model-limited.** RGB1 thresholds each
+1. **Colour is encoding-limited, not model-limited.** RGB1 thresholds each
    channel at 128, so every pixel snaps to one of 8 fully saturated colours;
    muted browns and greys cannot be represented at all. The fix is 2 bits per
    channel (64 colours): 16×16 × 6 bits = 1,536 bits. This needs a
    `bits_per_pixel = 2` path through preprocessing, the trainer and the UI.
-3. **Schedule.** Validation BER was best *before* full sharpening (0.1685 at
-   epoch 125 with `gain ≈ 12.8`, vs 0.1710 at gain 32). Softer `gain_end`
-   (8–16) may be worth ~0.005.
-4. **Gate removal for size.** Pruning dead gates is free. Removing *active*
+2. **Gate removal for size.** Pruning dead gates is free. Removing *active*
    gates with a tolerance gives a size-vs-BER frontier, which is arguably the
-   more interesting "tiny circuit" result.
+   more interesting "tiny circuit" result. Nothing has been tried here yet.
+3. **Seed-averaged reporting.** Every number in this file is one seed except
+   the variance table above. Re-measuring the headline result over 5 seeds is
+   cheap (~10 min on 8 cores) and would make later comparisons trustworthy.
 
 ## Gotchas
 

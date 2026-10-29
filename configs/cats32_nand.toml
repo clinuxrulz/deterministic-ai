@@ -6,7 +6,7 @@ image_size = 32
 key_bits = 128
 hidden = [512, 256]
 
-epochs = 300
+epochs = 200
 batch = 64
 lr = 0.01
 
