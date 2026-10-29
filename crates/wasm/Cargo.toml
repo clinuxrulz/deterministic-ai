@@ -9,6 +9,11 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# wasm-pack downloads prebuilt wasm-opt binaries, but none exist for Termux/Android.
+# Skip the optimisation pass so `pnpm dev`/`pnpm build` work on this platform.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [dependencies]
 xorae-core = { path = "../core" }
 wasm-bindgen = "0.2"
