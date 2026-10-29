@@ -294,6 +294,62 @@ impl Circuit {
         }
     }
 
+    /// Return a copy with every gate that cannot influence an output removed.
+    ///
+    /// Dead gates are free to delete: by definition they are not on any
+    /// output's dependency cone, so the function is identical. Wire indices are
+    /// remapped, so this shrinks the circuit without changing behaviour.
+    pub fn prune_dead(&self) -> Circuit {
+        let gate_start = self.gate_start();
+        let total = self.total_wires();
+        let mut keep = vec![false; total];
+        let mut stack = self.outputs.clone();
+        while let Some(wire) = stack.pop() {
+            let wire = wire as usize;
+            if wire >= total || keep[wire] {
+                continue;
+            }
+            keep[wire] = true;
+            if wire >= gate_start {
+                let gate = &self.gates[wire - gate_start];
+                stack.push(gate.a);
+                if !gate.op.is_unary() {
+                    stack.push(gate.b);
+                }
+            }
+        }
+
+        let mut map = vec![u16::MAX; total];
+        for (i, slot) in map.iter_mut().take(self.n_inputs as usize).enumerate() {
+            *slot = i as u16;
+        }
+        map[self.n_inputs as usize] = self.n_inputs;
+        map[self.n_inputs as usize + 1] = self.n_inputs + 1;
+
+        let mut gates = Vec::new();
+        for (i, gate) in self.gates.iter().enumerate() {
+            let wire = gate_start + i;
+            if !keep[wire] {
+                continue;
+            }
+            let a = map[gate.a as usize];
+            let b = map[gate.b as usize];
+            debug_assert!(a != u16::MAX && b != u16::MAX);
+            map[wire] = self.n_inputs + 2 + gates.len() as u16;
+            gates.push(Gate { op: gate.op, a, b });
+        }
+        let outputs = self
+            .outputs
+            .iter()
+            .map(|&wire| map[wire as usize])
+            .collect();
+        Circuit {
+            n_inputs: self.n_inputs,
+            gates,
+            outputs,
+        }
+    }
+
     /// True if every gate is XOR (constants/affine offsets are still allowed).
     pub fn is_xor_only(&self) -> bool {
         self.gates.iter().all(|g| matches!(g.op, Op::Xor))
@@ -393,6 +449,49 @@ mod tests {
         let a = Circuit::random(16, 64, 8, GateSet::XorAnd, 42);
         let b = Circuit::random(16, 64, 8, GateSet::XorAnd, 42);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn prune_dead_preserves_behaviour() {
+        // Gate 0 is dead: nothing reads it.
+        let circuit = Circuit {
+            n_inputs: 2,
+            gates: vec![
+                Gate {
+                    op: Op::Xor,
+                    a: 0,
+                    b: 1,
+                },
+                Gate {
+                    op: Op::Nand,
+                    a: 0,
+                    b: 1,
+                },
+            ],
+            outputs: vec![5, 2],
+        };
+        let pruned = circuit.prune_dead();
+        assert_eq!(pruned.gates.len(), 1);
+        pruned.validate().unwrap();
+        for bits in 0u64..4 {
+            let inputs = [bits & 1, (bits >> 1) & 1];
+            let mut arena = Vec::new();
+            let mut a = Vec::new();
+            circuit.eval_into(&inputs, 1, &mut arena, &mut a);
+            let mut arena = Vec::new();
+            let mut b = Vec::new();
+            pruned.eval_into(&inputs, 1, &mut arena, &mut b);
+            assert_eq!(a, b, "inputs {bits:02b}");
+        }
+    }
+
+    #[test]
+    fn prune_dead_is_idempotent() {
+        let c = Circuit::random(32, 128, 16, GateSet::Universal, 11);
+        let once = c.prune_dead();
+        let twice = once.prune_dead();
+        assert_eq!(once, twice);
+        assert!(twice.gates.len() <= c.gates.len());
     }
 
     #[test]

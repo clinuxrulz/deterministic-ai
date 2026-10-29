@@ -22,6 +22,7 @@ use anyhow::{bail, Context, Result};
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use xorae_core::bits::{plane_hamming, BitBatch};
@@ -296,6 +297,7 @@ fn softmax_k(logits: &[f32], out: &mut [f32]) {
     }
 }
 
+/// Shared parameters for the wiring search.
 struct Trainer {
     net: Net,
     /// Wire logits for the first and second NAND input, `n_gates * k` each.
@@ -303,19 +305,14 @@ struct Trainer {
     beta: Vec<f32>,
     probs_a: Vec<f32>,
     probs_b: Vec<f32>,
-    acts: Vec<Vec<f32>>,
-    zs: Vec<Vec<f32>>,
-    dz: Vec<Vec<f32>>,
     dalpha: Vec<f32>,
     dbeta: Vec<f32>,
-    batch: usize,
     gain: f32,
     binarize_weight: f32,
-    key_balance_weight: f32,
 }
 
 impl Trainer {
-    fn new(net: Net, batch: usize, cfg: &NandConfig, rng: &mut impl Rng) -> Self {
+    fn new(net: Net, cfg: &NandConfig, rng: &mut impl Rng) -> Self {
         let n_gates = net.n_gates;
         let k = net.k;
         let mut alpha = vec![0.0f32; n_gates * k];
@@ -330,22 +327,6 @@ impl Trainer {
                 beta[g * k + j] = if j == pb { 2.0 } else { -2.0 };
             }
         }
-        let layers = net.layers.len();
-        let mut acts = Vec::with_capacity(layers + 1);
-        for l in 0..=layers {
-            let n = if l == 0 {
-                net.n_inputs
-            } else {
-                net.layers[l - 1].n_out
-            };
-            acts.push(vec![0.0; n * batch]);
-        }
-        let mut zs = Vec::with_capacity(layers);
-        let mut dz = Vec::with_capacity(layers);
-        for layer in &net.layers {
-            zs.push(vec![0.0; layer.n_out * batch]);
-            dz.push(vec![0.0; layer.n_out * batch]);
-        }
         Self {
             alpha,
             beta,
@@ -353,14 +334,9 @@ impl Trainer {
             probs_b: vec![0.0; n_gates * k],
             dalpha: vec![0.0; n_gates * k],
             dbeta: vec![0.0; n_gates * k],
-            acts,
-            zs,
-            dz,
             net,
-            batch,
             gain: cfg.gain_start,
             binarize_weight: cfg.binarize_weight,
-            key_balance_weight: cfg.key_balance_weight,
         }
     }
 
@@ -381,27 +357,90 @@ impl Trainer {
         }
     }
 
-    fn forward(&mut self, input: &[f32]) {
-        let b = self.batch;
-        let k = self.net.k;
+    /// A worker covering the whole batch, used by tests and single-threaded use.
+    #[cfg(test)]
+    fn full_worker(&self, batch: usize) -> Work {
+        let mut w = Work::new(&self.net, batch, 0, batch);
+        w.binarize_weight = self.binarize_weight;
+        w.key_balance_weight = 0.0;
+        w
+    }
+}
+
+/// Per-thread scratch. Each worker owns a slice of the batch (samples
+/// `s0..s1`), with `stride == batch` so the shared plane layout is unchanged.
+struct Work {
+    stride: usize,
+    s0: usize,
+    s1: usize,
+    acts: Vec<Vec<f32>>,
+    zs: Vec<Vec<f32>>,
+    dz: Vec<Vec<f32>>,
+    da: Vec<f32>,
+    db: Vec<f32>,
+    loss: f64,
+    /// Per-key-bit activation sums over this worker's samples.
+    key_sum: Vec<f32>,
+    binarize_weight: f32,
+    key_balance_weight: f32,
+}
+
+impl Work {
+    fn new(net: &Net, stride: usize, s0: usize, s1: usize) -> Self {
+        let layers = net.layers.len();
+        let mut acts = Vec::with_capacity(layers + 1);
+        for l in 0..=layers {
+            let n = if l == 0 {
+                net.n_inputs
+            } else {
+                net.layers[l - 1].n_out
+            };
+            acts.push(vec![0.0; n * stride]);
+        }
+        let mut zs = Vec::with_capacity(layers);
+        let mut dz = Vec::with_capacity(layers);
+        for layer in &net.layers {
+            zs.push(vec![0.0; layer.n_out * stride]);
+            dz.push(vec![0.0; layer.n_out * stride]);
+        }
+        Self {
+            stride,
+            s0,
+            s1,
+            acts,
+            zs,
+            dz,
+            da: vec![0.0; net.n_gates * net.k],
+            db: vec![0.0; net.n_gates * net.k],
+            loss: 0.0,
+            key_sum: vec![0.0; net.key_bits],
+            binarize_weight: 0.0,
+            key_balance_weight: 0.0,
+        }
+    }
+
+    fn forward(&mut self, net: &Net, pa: &[f32], pb: &[f32], input: &[f32]) {
+        let stride = self.stride;
+        let (s0, s1) = (self.s0, self.s1);
+        let k = net.k;
         self.acts[0].copy_from_slice(input);
-        for l in 0..self.net.layers.len() {
+        for l in 0..net.layers.len() {
             {
-                let layer = &self.net.layers[l];
+                let layer = &net.layers[l];
                 let acts = &self.acts;
                 let z = &mut self.zs[l];
                 for j in 0..layer.n_out {
                     let g = layer.gate_off + j;
-                    let o = j * b;
-                    for s in 0..b {
+                    let o = j * stride;
+                    for s in s0..s1 {
                         let mut u = 0.0;
                         let mut v = 0.0;
                         for c in 0..k {
                             let src = layer.cand_layer[j * k + c] as usize;
                             let idx = layer.cand_idx[j * k + c] as usize;
-                            let x = acts[src][idx * b + s];
-                            u += self.probs_a[g * k + c] * x;
-                            v += self.probs_b[g * k + c] * x;
+                            let x = acts[src][idx * stride + s];
+                            u += pa[g * k + c] * x;
+                            v += pb[g * k + c] * x;
                         }
                         z[o + s] = 1.0 - u * v;
                     }
@@ -409,128 +448,174 @@ impl Trainer {
             }
             let z = &self.zs[l];
             let next = &mut self.acts[l + 1];
-            // Literal NAND thresholds at 0.5; the soft penalty pulls values to
-            // the rails, so no hard step is needed during training.
-            next.copy_from_slice(z);
+            for j in 0..net.layers[l].n_out {
+                let o = j * stride;
+                next[o + s0..o + s1].copy_from_slice(&z[o + s0..o + s1]);
+            }
         }
     }
 
-    fn loss(&self, target: &[f32]) -> f32 {
-        let last = self.net.layers.len() - 1;
+    fn loss(
+        &mut self,
+        net: &Net,
+        target: &[f32],
+        binarize_weight: f32,
+        total_samples: usize,
+    ) -> f32 {
+        let stride = self.stride;
+        let (s0, s1) = (self.s0, self.s1);
+        let last = net.layers.len() - 1;
         let z = &self.zs[last];
-        let n = z.len();
+        // Normalise by the global batch size so per-worker partial sums add up
+        // to exactly the single-threaded loss, whatever the split.
+        let n_global = (net.layers[last].n_out * total_samples).max(1) as f32;
         let mut total = 0.0;
-        for i in 0..n {
-            let d = z[i] - target[i];
-            total += d * d;
+        for j in 0..net.layers[last].n_out {
+            let o = j * stride;
+            for s in s0..s1 {
+                let d = z[o + s] - target[o + s];
+                total += d * d;
+            }
         }
-        let mut total = total / n as f32;
-        if self.binarize_weight > 0.0 {
+        let mut total = total / n_global;
+        if binarize_weight > 0.0 {
             let mut pen = 0.0;
-            let mut count = 0usize;
             for l in 1..=last + 1 {
-                for &a in &self.acts[l] {
-                    pen += a * (1.0 - a);
+                let plane = self.acts[l].len() / stride;
+                for i in 0..plane {
+                    for s in s0..s1 {
+                        let a = self.acts[l][i * stride + s];
+                        pen += a * (1.0 - a);
+                    }
                 }
-                count += self.acts[l].len();
             }
-            if count > 0 {
-                total += self.binarize_weight * (pen / count as f32);
+            let mut planes = 0usize;
+            for l in 1..=last + 1 {
+                planes += self.acts[l].len() / stride;
             }
+            let denom = (planes * total_samples).max(1) as f32;
+            total += binarize_weight * (pen / denom);
         }
+        self.loss = total as f64;
         total
     }
 
-    fn backward(&mut self, target: &[f32]) {
-        let b = self.batch;
-        let k = self.net.k;
-        let last = self.net.layers.len() - 1;
-        let n_last = self.net.layers[last].n_out;
+    /// `key_mean[k]` is the global mean of key bit `k` across the whole batch,
+    /// so the balance gradient is identical regardless of how the batch is
+    /// split between workers.
+    fn backward(
+        &mut self,
+        net: &Net,
+        pa: &[f32],
+        pb: &[f32],
+        target: &[f32],
+        key_mean: &[f32],
+        total_samples: usize,
+    ) {
+        let stride = self.stride;
+        let (s0, s1) = (self.s0, self.s1);
+        let k = net.k;
+        let last = net.layers.len() - 1;
 
         for d in self.dz.iter_mut() {
             d.fill(0.0);
         }
+        self.da.fill(0.0);
+        self.db.fill(0.0);
         {
+            let n_last = net.layers[last].n_out;
+            let scale = 2.0 / (n_last * total_samples).max(1) as f32;
             let z = &self.zs[last];
             let dz = &mut self.dz[last];
-            let scale = 2.0 / (n_last * b) as f32;
-            for i in 0..n_last * b {
-                dz[i] += scale * (z[i] - target[i]);
-            }
-        }
-        if self.binarize_weight > 0.0 {
-            let w = self.binarize_weight;
-            for l in 0..self.net.layers.len() {
-                let n = self.acts[l + 1].len() as f32;
-                let scale = w / n;
-                let a = &self.acts[l + 1];
-                let dz = &mut self.dz[l];
-                for i in 0..a.len() {
-                    dz[i] += scale * (1.0 - 2.0 * a[i]);
+            for j in 0..n_last {
+                let o = j * stride;
+                for s in s0..s1 {
+                    dz[o + s] += scale * (z[o + s] - target[o + s]);
                 }
             }
         }
-        if self.key_balance_weight > 0.0 {
-            let enc_last = self.net.enc_layers - 1;
-            let n = self.net.key_bits;
-            let w = self.key_balance_weight;
-            let key = &self.acts[self.net.enc_layers];
+
+        let kbw = self.key_balance_weight;
+        if kbw > 0.0 {
+            let enc_last = net.enc_layers - 1;
+            let n = net.key_bits;
             let dz = &mut self.dz[enc_last];
             for bit in 0..n {
-                let mut sum = 0.0;
-                for s in 0..b {
-                    sum += key[bit * b + s];
+                let g = kbw * 2.0 * (key_mean[bit] - 0.5) / total_samples as f32;
+                for s in s0..s1 {
+                    dz[bit * stride + s] += g;
                 }
-                let p = sum / b as f32;
-                let g = w * 2.0 * (p - 0.5) / b as f32;
-                for s in 0..b {
-                    dz[bit * b + s] += g;
+            }
+        }
+
+        let bw = self.binarize_weight;
+        if bw > 0.0 {
+            for l in 0..net.layers.len() {
+                let plane = self.acts[l + 1].len() / stride;
+                let scale = bw / (plane * total_samples).max(1) as f32;
+                let a = &self.acts[l + 1];
+                let dz = &mut self.dz[l];
+                for i in 0..plane {
+                    for s in s0..s1 {
+                        dz[i * stride + s] += scale * (1.0 - 2.0 * a[i * stride + s]);
+                    }
                 }
             }
         }
 
         for l in (0..=last).rev() {
-            let layer = &self.net.layers[l];
+            let layer = &net.layers[l];
             let acts = &self.acts;
             let dz = &mut self.dz;
-            let dalpha = &mut self.dalpha;
-            let dbeta = &mut self.dbeta;
+            let dalpha = &mut self.da;
+            let dbeta = &mut self.db;
             let dzl = std::mem::take(&mut dz[l]);
             for j in 0..layer.n_out {
                 let g = layer.gate_off + j;
-                let o = j * b;
-                for s in 0..b {
+                let o = j * stride;
+                for s in s0..s1 {
                     let dzj = dzl[o + s];
                     if dzj == 0.0 {
                         continue;
                     }
-                    // Recompute u and v for this gate and sample.
                     let mut u = 0.0;
                     let mut v = 0.0;
                     for c in 0..k {
                         let src = layer.cand_layer[j * k + c] as usize;
                         let idx = layer.cand_idx[j * k + c] as usize;
-                        let x = acts[src][idx * b + s];
-                        u += self.probs_a[g * k + c] * x;
-                        v += self.probs_b[g * k + c] * x;
+                        let x = acts[src][idx * stride + s];
+                        u += pa[g * k + c] * x;
+                        v += pb[g * k + c] * x;
                     }
                     let du = dzj * (-v);
                     let dv = dzj * (-u);
                     for c in 0..k {
                         let src = layer.cand_layer[j * k + c] as usize;
                         let idx = layer.cand_idx[j * k + c] as usize;
-                        let x = acts[src][idx * b + s];
+                        let x = acts[src][idx * stride + s];
                         dalpha[g * k + c] += du * x;
                         dbeta[g * k + c] += dv * x;
                         if src > 0 {
-                            let contrib =
-                                du * self.probs_a[g * k + c] + dv * self.probs_b[g * k + c];
-                            dz[src - 1][idx * b + s] += contrib;
+                            let contrib = du * pa[g * k + c] + dv * pb[g * k + c];
+                            dz[src - 1][idx * stride + s] += contrib;
                         }
                     }
                 }
             }
             dz[l] = dzl;
+        }
+    }
+
+    /// Sum this worker's key activations into `key_sum`.
+    fn accumulate_key(&mut self, net: &Net) {
+        let stride = self.stride;
+        let key = &self.acts[net.enc_layers];
+        for bit in 0..net.key_bits {
+            let mut sum = 0.0;
+            for s in self.s0..self.s1 {
+                sum += key[bit * stride + s];
+            }
+            self.key_sum[bit] = sum;
         }
     }
 }
@@ -869,10 +954,35 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
         cfg.hidden, cfg.key_bits, cfg.hidden, n_gates, cfg.k()
     );
 
-    let mut trainer = Trainer::new(net, cfg.batch, cfg, &mut rng);
+    let mut trainer = Trainer::new(net, cfg, &mut rng);
     let mut adam_a = Adam::new(n_gates * cfg.k(), cfg.lr);
     let mut adam_b = Adam::new(n_gates * cfg.k(), cfg.lr);
     let mut order: Vec<usize> = (0..train_pool.len()).collect();
+
+    // Split each batch across threads. Each worker owns its own scratch and
+    // gradient buffers; the main thread reduces them before the Adam step.
+    let n_workers = rayon::current_num_threads().clamp(1, 8);
+    let chunk = cfg.batch.div_ceil(n_workers);
+    let mut pool: Vec<Work> = (0..n_workers)
+        .filter_map(|i| {
+            let s0 = (i * chunk).min(cfg.batch);
+            let s1 = ((i + 1) * chunk).min(cfg.batch);
+            if s1 > s0 {
+                let mut w = Work::new(&trainer.net, cfg.batch, s0, s1);
+                w.binarize_weight = cfg.binarize_weight;
+                w.key_balance_weight = cfg.key_balance_weight;
+                Some(w)
+            } else {
+                None
+            }
+        })
+        .collect();
+    eprintln!(
+        "using {} worker thread(s) for gradient evaluation",
+        pool.len()
+    );
+    let mut key_totals = vec![0f32; trainer.net.key_bits];
+    let mut key_mean = vec![0f32; trainer.net.key_bits];
 
     let log_file = File::create(out_dir.join("log.csv"))?;
     let mut log = BufWriter::new(log_file);
@@ -906,12 +1016,42 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
                 }
             }
             trainer.refresh_probs();
-            trainer.forward(&input);
-            epoch_loss += trainer.loss(&target) as f64;
-            epoch_batches += 1;
+            pool.par_iter_mut().for_each(|w| {
+                w.forward(&trainer.net, &trainer.probs_a, &trainer.probs_b, &input);
+                w.loss(&trainer.net, &target, trainer.binarize_weight, batch);
+                w.accumulate_key(&trainer.net);
+            });
+            key_totals.fill(0.0);
+            for w in &pool {
+                for (t, v) in key_totals.iter_mut().zip(w.key_sum.iter()) {
+                    *t += v;
+                }
+            }
+            for (m, t) in key_mean.iter_mut().zip(key_totals.iter()) {
+                *m = t / batch as f32;
+            }
+            pool.par_iter_mut().for_each(|w| {
+                w.backward(
+                    &trainer.net,
+                    &trainer.probs_a,
+                    &trainer.probs_b,
+                    &target,
+                    &key_mean,
+                    batch,
+                );
+            });
             trainer.dalpha.fill(0.0);
             trainer.dbeta.fill(0.0);
-            trainer.backward(&target);
+            for w in &pool {
+                for (a, b) in trainer.dalpha.iter_mut().zip(w.da.iter()) {
+                    *a += b;
+                }
+                for (a, b) in trainer.dbeta.iter_mut().zip(w.db.iter()) {
+                    *a += b;
+                }
+                epoch_loss += w.loss;
+            }
+            epoch_batches += 1;
             adam_a.step(&mut trainer.alpha, &trainer.dalpha);
             adam_b.step(&mut trainer.beta, &trainer.dbeta);
             step += 1;
@@ -929,6 +1069,7 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
                 started.elapsed().as_millis(),
                 trainer.gain
             )?;
+            log.flush()?;
         }
         if cfg.val_every > 0 && (epoch % cfg.val_every == 0 || epoch + 1 == cfg.epochs) {
             let (encoder, decoder) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
@@ -978,6 +1119,15 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
         encoder.validate().map_err(anyhow::Error::msg)?;
         decoder.validate().map_err(anyhow::Error::msg)?;
     }
+    let before = encoder.gates.len() + decoder.gates.len();
+    encoder = encoder.prune_dead();
+    decoder = decoder.prune_dead();
+    let after = encoder.gates.len() + decoder.gates.len();
+    eprintln!(
+        "pruned dead gates: {before} -> {after} ({} removed)",
+        before - after
+    );
+
     let mut model = make_model(dataset, cfg, encoder, decoder);
     if let Ok(report) = crate::ga::evaluate_model(&model, dataset, &val_pool) {
         model.metrics.val_ber = report.ber;
@@ -1076,7 +1226,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
         let net = Net::build(&cfg, &mut rng).unwrap();
         let batch = 1;
-        let mut trainer = Trainer::new(net, batch, &cfg, &mut rng);
+        let mut trainer = Trainer::new(net, &cfg, &mut rng);
         // Force one-hot candidate choices.
         let k = trainer.net.k;
         for g in 0..trainer.net.n_gates {
@@ -1092,9 +1242,10 @@ mod tests {
         let input: Vec<f32> = (0..64)
             .map(|i| if i % 3 == 0 { 1.0 } else { 0.0 })
             .collect();
-        trainer.forward(&input);
+        let mut work = trainer.full_worker(batch);
+        work.forward(&trainer.net, &trainer.probs_a, &trainer.probs_b, &input);
         let last = trainer.net.layers.len() - 1;
-        let expected = trainer.acts[last + 1].clone();
+        let expected = work.acts[last + 1].clone();
 
         let (encoder, decoder) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
         let input_planes: Vec<u64> = input.iter().map(|&v| v as u64).collect();

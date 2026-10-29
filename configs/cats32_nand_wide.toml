@@ -1,0 +1,30 @@
+# Capacity test: NAND-only wiring search with an extra same-resolution layer.
+#
+# 32x32 -> 32x32 -> 16x32 -> 16x16 -> 8x16 (128-bit key) -> mirror.
+# 4,736 NAND gates (vs 2,688), still 8x compression.
+image_size = 32
+channels = 1
+key_bits = 128
+hidden = [1024, 512, 256]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+polish_sweeps = 0
+polish_samples = 512
+
+seed = 42
+log_every = 10
+val_every = 25

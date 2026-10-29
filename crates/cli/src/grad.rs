@@ -310,10 +310,22 @@ pub(crate) fn derive_shapes_from(
             } else {
                 (cur.0, cur.1 / 2)
             };
+        } else if target < area {
+            // Proportional reduction (e.g. 192 -> 128): shrink whichever axis
+            // divides exactly. Lets the key width be any divisor of the input.
+            let a = cur.0 * target / area;
+            let b = cur.1 * target / area;
+            if a > 0 && cur.1 * a == target {
+                cur = (a, cur.1);
+            } else if b > 0 && cur.0 * b == target {
+                cur = (cur.0, b);
+            } else {
+                bail!("layer width {target} is not reachable from area {area}");
+            }
         } else {
             bail!(
-                "layer width {target} is not a halving of {area}; \
-                 choose hidden widths that halve the image area"
+                "layer width {target} is not a reduction of {area}; \
+                 choose hidden widths that reduce the image area"
             );
         }
         if cur.0 * cur.1 != target {
@@ -1143,8 +1155,15 @@ mod tests {
     }
 
     #[test]
-    fn shapes_reject_non_halving_widths() {
-        assert!(derive_shapes(8, &[64, 40, 8]).is_err());
+    fn shapes_support_proportional_reductions() {
+        // 64 -> 40 -> 8 is not a halving chain, but every step divides exactly.
+        let shapes = derive_shapes(8, &[64, 40, 8]).unwrap();
+        assert_eq!(shapes, vec![(8, 8), (5, 8), (1, 8)]);
+    }
+
+    #[test]
+    fn shapes_reject_indivisible_widths() {
+        assert!(derive_shapes(8, &[64, 41, 8]).is_err());
     }
 
     #[test]
