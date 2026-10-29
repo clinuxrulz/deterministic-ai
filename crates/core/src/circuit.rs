@@ -64,6 +64,9 @@ pub enum GateSet {
     /// Every binary operation, uniformly. `Nand` and `Nor` alone are
     /// functionally complete, so this contains universal gate sets.
     Universal,
+    /// NAND only. Functionally complete on its own, so a circuit is fully
+    /// described by its wiring.
+    NandOnly,
 }
 
 impl GateSet {
@@ -96,6 +99,7 @@ impl GateSet {
                     Op::Not
                 }
             }
+            GateSet::NandOnly => Op::Nand,
             GateSet::Universal => {
                 if r < 1.0 / 6.0 {
                     Op::Xor
@@ -376,6 +380,12 @@ mod tests {
             c.eval_into(&inputs, 1, &mut arena, &mut out);
             assert_eq!(out.len(), 8);
         }
+    }
+
+    #[test]
+    fn nand_only_circuits_use_nand() {
+        let c = Circuit::random(16, 64, 8, GateSet::NandOnly, 5);
+        assert!(c.gates.iter().all(|g| g.op == Op::Nand));
     }
 
     #[test]

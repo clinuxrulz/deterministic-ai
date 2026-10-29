@@ -1,0 +1,30 @@
+# NAND-only circuit. Every gate is identical; the ONLY learned quantity is
+# which two wires each gate reads. This is the minimal search space.
+#
+# 32x32 -> 16x32 -> 16x16 -> 8x16 (128-bit key) -> mirror. 2,688 NAND gates.
+image_size = 32
+key_bits = 128
+hidden = [512, 256]
+
+epochs = 300
+batch = 64
+lr = 0.01
+
+# Candidate wires per gate: 9 from the local window, 3 long-range.
+n_local = 9
+n_global = 3
+# 30% of long-range candidates come from an earlier layer (skip connection).
+skip_prob = 0.30
+
+# Soft penalty pulling activations to 0/1 so the exported NAND circuit matches.
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+# Anneal the candidate softmax from soft to one-hot.
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+seed = 42
+log_every = 10
+val_every = 25

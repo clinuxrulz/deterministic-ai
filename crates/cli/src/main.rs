@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use xorae::config::TrainConfig;
 use xorae::dataset::Dataset;
-use xorae::{baselines, config, dataset, ga, grad, render, toy};
+use xorae::{baselines, config, dataset, ga, grad, nand, render, toy};
 use xorae_core::color::ColorMode;
 use xorae_core::preprocess::{BinarizeMode, PreprocessOptions};
 use xorae_core::Model;
@@ -75,6 +75,19 @@ enum CliCommand {
         #[arg(long)]
         data: PathBuf,
         #[arg(long, default_value = "runs/grad")]
+        out: PathBuf,
+        #[arg(long)]
+        seed: Option<u64>,
+        #[arg(long)]
+        epochs: Option<usize>,
+    },
+    /// Train a NAND-only circuit by search over wiring (all gates identical).
+    TrainNand {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long, default_value = "runs/nand")]
         out: PathBuf,
         #[arg(long)]
         seed: Option<u64>,
@@ -294,6 +307,34 @@ fn main() -> Result<()> {
                 cfg.image_size, cfg.image_size, cfg.key_bits, cfg.epochs, cfg.seed
             );
             let model = grad::run_grad(&dataset, &cfg, &out)?;
+            println!(
+                "model written to {} (test BER {:.4})",
+                out.join("model.json").display(),
+                model.metrics.test_ber
+            );
+            Ok(())
+        }
+        CliCommand::TrainNand {
+            config,
+            data,
+            out,
+            seed,
+            epochs,
+        } => {
+            let mut cfg = nand::NandConfig::from_toml(&config)?;
+            if let Some(seed) = seed {
+                cfg.seed = seed;
+            }
+            if let Some(epochs) = epochs {
+                cfg.epochs = epochs;
+            }
+            cfg.validate()?;
+            let dataset = Dataset::load(&data)?;
+            println!(
+                "training NAND wiring: {}x{}, {}-bit key, {} epochs (seed {})",
+                cfg.image_size, cfg.image_size, cfg.key_bits, cfg.epochs, cfg.seed
+            );
+            let model = nand::run_nand(&dataset, &cfg, &out)?;
             println!(
                 "model written to {} (test BER {:.4})",
                 out.join("model.json").display(),

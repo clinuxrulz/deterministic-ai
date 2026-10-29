@@ -278,7 +278,7 @@ impl Net {
 }
 
 /// Derive an image shape for every layer by halving the longer axis.
-fn derive_shapes(side: usize, sizes: &[usize]) -> Result<Vec<(usize, usize)>> {
+pub(crate) fn derive_shapes(side: usize, sizes: &[usize]) -> Result<Vec<(usize, usize)>> {
     let mut shapes = vec![(side, side)];
     let mut cur = (side, side);
     for &target in &sizes[1..] {
@@ -373,7 +373,7 @@ fn pick_source(
     (src as u32, pick(rng, y0, y1, x0, x1, iw))
 }
 
-fn window(
+pub(crate) fn window(
     oy: usize,
     ox: usize,
     in_shape: (usize, usize),
@@ -407,7 +407,14 @@ fn window(
     }
 }
 
-fn pick(rng: &mut impl Rng, y0: usize, y1: usize, x0: usize, x1: usize, iw: usize) -> u32 {
+pub(crate) fn pick(
+    rng: &mut impl Rng,
+    y0: usize,
+    y1: usize,
+    x0: usize,
+    x1: usize,
+    iw: usize,
+) -> u32 {
     let w = (x1 - x0).max(1);
     let h = (y1 - y0).max(1);
     let k = rng.gen_range(0..(h * w));
