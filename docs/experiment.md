@@ -316,7 +316,9 @@ it is worth ~0.002 val regardless of the schedule.
 
 The wide model fits the training set substantially better and generalises
 substantially worse. More capacity is not the constraint; the earlier
-"inconclusive" run was heading to this answer. It also overshoots harder: at
+"inconclusive" run was heading to this answer. The lower MSE with worse BER is
+objective mismatch rather than overfitting (see Checkpoint 5). It also
+overshoots harder: at
 `gain_end` 32 the best val is epoch 175 (0.1879) and then rises to 0.1984 at
 epoch 199; at `gain_end` 12 the best is epoch 125 (0.2113) and it climbs to
 0.2314 — the opposite of the narrow model, where lower gain stopped the
@@ -473,3 +475,145 @@ beats 1,198 at the same 768-bit input).
 All twelve trained models were run through `simplify --verify`, which also
 re-verified exactness on 6,000 samples each (72,000 comparisons, all identical).
 Gate counts above are post-simplification, so rgb1 and rgb2 are comparable.
+## Checkpoint 5 (2026-10-30): can it fit at all? (objective experiments)
+
+Motivated by two facts: (a) train BER ≈ val BER ≈ test BER on the shipped model
+(0.1728 / 0.1710 / 0.1727), i.e. no overfitting gap; and (b) the wide model had
+a *lower* train MSE but a *worse* BER, so the training objective and the
+reported metric disagree. Both point at optimisation/representation rather than
+data or gate budget.
+
+### Diagnostic: memorise 100 images
+
+`train-nand --train-limit 100` uses only 100 training images. Two runs, because
+the first had far fewer gradient updates than a full run (100 samples / batch 64
+= 1 batch per epoch):
+
+| Run | Updates | Train BER on the 100 | Val (1,001) | Test (1,000) |
+|---|---|---|---|---|
+| 200 epochs | ~200 | 0.3180 | 0.3189 | 0.3214 |
+| 12,000 epochs (≈ full-run updates) | ~12,000 | **0.1741** | 0.2058 | 0.2107 |
+
+**The model cannot memorise 100 images any better than it reconstructs 4,000.**
+100 images with a 128-bit key and 2,688 gates should be trivially memorisable
+(the key alone can index 2^128 patterns), so this is a limit of the
+representation/optimiser, not of data volume or key capacity. It also rules out
+data augmentation and regularisation as fixes, and explains why the wide model
+(same schedule, more gates) did not help.
+
+Note the 12,000-epoch run also drove train MSE down (0.089) while train BER
+stayed at 0.174 — the same MSE/BER divergence seen in the wide model.
+
+### Experiment: straight-through binarisation
+
+`--ste` hard-thresholds every activation in the forward pass and passes
+gradients through unchanged (the standard BNN trick), so the trained network is
+the exported circuit and the loss (MSE on hard bits) equals BER.
+
+| Seed | Train BER | Val BER | Test BER | Gates |
+|---|---|---|---|---|
+| 0 | 0.3116 | 0.3116 | 0.3128 | 1,296 |
+| 1 | 0.3272 | 0.3256 | 0.3270 | 1,233 |
+| 2 | 0.3206 | 0.3179 | 0.3198 | 1,303 |
+| baseline (0-4) | — | — | 0.1730 ± 0.0066 | 1,547 |
+
+Clearly worse — roughly the all-ones bias level. The mechanism is visible in
+the logs: at `gain = 1` the candidate softmax is near-uniform, so every gate's
+`z ≈ 0.75` and hard-thresholds to 1. The network starts saturated and never
+escapes. This reproduces the older "hard binarisation collapses" finding, and
+shows that a straight-through gradient is not sufficient on its own when the
+hard decision is made before the wiring has sharpened.
+
+`--wire-ste` is the literature-faithful variant: keep activations soft but make
+the forward pass use each gate's **argmax candidate wire** — the circuit that
+will actually be exported — with gradients flowing through the softmax as
+before. This removes the train/export wiring gap instead of the activation gap.
+
+| Run | Train BER | Val BER | Test BER | Gates |
+|---|---|---|---|---|
+| seed 42 | 0.2159 | 0.2124 | 0.2164 | 1,549 |
+| baseline seed 42 | 0.1728 | 0.1698 | 0.1722 | 1,547 |
+
+Also worse, though not catastrophically: it plateaus by epoch ~75 and stops
+improving. The annealing schedule turns out to be doing the discretisation work
+better than hard-argmax training does.
+
+### What this means
+
+The exported-circuit gap is *not* the bottleneck: the wire-STE run's train BER
+(0.2159) is essentially its test BER (0.2164), and the soft baseline's train
+(0.1728) is essentially its test. Training and inference agree; the model is
+simply not expressive or searchable enough at this gate budget.
+
+So the remaining lever is capacity per gate, not objective alignment:
+
+1. **Free inversions** (AIG edges): 42% of reachable gates are `Nand(x,x)`.
+2. **Spatial weight sharing**, as in convolutional logic gate networks.
+3. **Distillation** from a CNN teacher, to give smoother targets.
+4. A margin/hinge loss on the bit decision instead of MSE, which keeps soft
+   gradients but stops rewarding ambiguous outputs near 0.5.
+
+STE appears in the literature (Gumbel LGNs, NeurIPS 2025) applied to *gate
+selection* in a network whose activations are already binary by construction,
+trained for classification with a handful of outputs. Neither of those
+conditions holds here: we have 1,024 outputs and a 128-bit bottleneck, and the
+wiring starts random.
+## Checkpoint 6 (2026-10-30): the gate relaxation matters
+
+The soft NAND used during training is `1 - u·v` (product t-norm). Every
+relaxation is exact on hard 0/1 inputs, but they differ on soft activations,
+and that difference turns out to be worth more than any scheduling change.
+
+The motivation is a property of the *diagonal*: `NAND(x, x) = NOT x`, so a
+diagonal gate should be an exact negation. Under product it is `1 - x²`, which
+equals `NOT x` only at 0 and 1; under the Gödel t-norm `1 - min(u, v)` it is
+exactly `1 - x` because `min` is idempotent. Since 30-40% of trained gates are
+diagonal, product was systematically mis-scoring a third of the circuit.
+
+Implemented as `--relaxation {product,min,lukasiewicz}` with subgradients
+(`min`: `-1` on the smaller input, `0` on the larger; ties send the gradient to
+`u` so it is never double-counted). Unit tests check hard-input agreement and
+match the analytic gradients against finite differences.
+
+### Paired result, seeds 0-9
+
+| | product | min (Gödel) |
+|---|---|---|
+| Test BER | 0.1730 ± 0.0060 | **0.1641 ± 0.0093** |
+| Paired difference | — | **−0.0089**, 95% CI [−0.0159, −0.0019] |
+| Seeds won | — | 7 / 10 |
+| t(9) | — | −2.88 (p ≈ 0.018) |
+| NAND gates after simplify | 1,572 ± 52 | 1,843 ± 44 (+17%) |
+| Inverter gates | 34.7% | **22.7%** |
+| Real two-input nodes | 1,027 (65.3%) | **1,426 (77.3%)** |
+
+Łukasiewicz (`1 - max(0, u+v-1)`) was rejected on one seed: test BER 0.2117,
+consistent with its nilpotent, zero-gradient-when-`u+v <= 1` behaviour.
+
+### Why this is a real effect and not seed luck
+
+The first five seeds gave −0.0071 with p ≈ 0.08, which was not enough to claim
+anything; five more pairs (seeds 5-9, both configs) took it to −0.0089 with the
+95% CI excluding zero. The direction also matches a mechanism: min keeps 77% of
+gates as real two-input logic versus 65% for product.
+
+### Costs and caveats
+
+- **+17% gates.** This is better BER for the same 2,688-gate training budget,
+  not the same output size. If size is the headline, run the lossy gate-removal
+  pass on the min model and compare on that frontier.
+- **More variance.** sd rises from 0.0060 to 0.0093 across seeds.
+- **The mechanism is measured indirectly.** The structural shift is real; "the
+  diagonal explains it" is an explanation, not an experiment. Logging how often
+  the argmax picks `a == b` under each relaxation would test it directly.
+- The published demo artifact is still the product-relaxation model (0.1727 /
+  1,547 gates). Re-exporting with min would gain ~0.003 BER on seed 42 at +21%
+  gates, which is inside single-seed noise — not worth changing the artifact.
+
+### Reproduce
+
+```bash
+cargo run --release -p xorae -- train-nand \
+  --config configs/cats32_nand.toml \
+  --data data/cats32_threshold.bin --out runs/nand32_godel --seed 0
+```

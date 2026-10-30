@@ -32,6 +32,24 @@ use xorae_core::{BinarizeMode, GateSet, Model, ModelConfig, ModelMetrics};
 use crate::dataset::Dataset;
 use crate::grad::{derive_shapes_from, pick, window};
 
+/// Continuous relaxation of `NAND(a, b) = NOT(a AND b)`.
+///
+/// On hard inputs all three agree exactly; they differ in how they behave on
+/// soft activations and how gradients flow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Relaxation {
+    /// Probabilistic/product t-norm: `1 - a*b`. Standard for logic gate nets.
+    #[default]
+    Product,
+    /// Gödel/Zadeh t-norm: `1 - min(a, b)`. Proposed to reduce vanishing
+    /// gradients; piecewise linear with a kink at `a == b`.
+    Min,
+    /// Łukasiewicz t-norm: `1 - max(0, a + b - 1)`. Nilpotent, zero gradient
+    /// when `a + b <= 1`.
+    Lukasiewicz,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NandConfig {
     pub image_size: usize,
@@ -75,6 +93,24 @@ pub struct NandConfig {
     /// Training samples used to score a candidate wire swap.
     #[serde(default = "default_polish_samples")]
     pub polish_samples: usize,
+    /// Train on only the first N training samples (diagnostics / overfit tests).
+    #[serde(default)]
+    pub train_limit: Option<usize>,
+    /// Straight-through binarisation: the forward pass uses hard 0/1
+    /// activations (matching the exported circuit) while gradients pass
+    /// through unchanged. Aligns the loss with BER and removes the need for
+    /// the `a(1-a)` penalty.
+    #[serde(default)]
+    pub ste: bool,
+    /// Straight-through wiring: the forward pass uses each gate's argmax
+    /// candidate wire (i.e. the circuit that will be exported) while gradients
+    /// flow through the softmax as if it were soft. Removes the gap between
+    /// the trained network and the exported circuit.
+    #[serde(default)]
+    pub wire_ste: bool,
+    /// Continuous relaxation used for the NAND gate.
+    #[serde(default)]
+    pub relaxation: Relaxation,
     pub seed: u64,
     #[serde(default = "default_log_every")]
     pub log_every: usize,
@@ -383,6 +419,9 @@ struct Work {
     key_sum: Vec<f32>,
     binarize_weight: f32,
     key_balance_weight: f32,
+    ste: bool,
+    wire_ste: bool,
+    relaxation: Relaxation,
 }
 
 impl Work {
@@ -416,6 +455,9 @@ impl Work {
             key_sum: vec![0.0; net.key_bits],
             binarize_weight: 0.0,
             key_balance_weight: 0.0,
+            ste: false,
+            wire_ste: false,
+            relaxation: Relaxation::Product,
         }
     }
 
@@ -432,25 +474,52 @@ impl Work {
                 for j in 0..layer.n_out {
                     let g = layer.gate_off + j;
                     let o = j * stride;
-                    for s in s0..s1 {
-                        let mut u = 0.0;
-                        let mut v = 0.0;
-                        for c in 0..k {
-                            let src = layer.cand_layer[j * k + c] as usize;
-                            let idx = layer.cand_idx[j * k + c] as usize;
-                            let x = acts[src][idx * stride + s];
-                            u += pa[g * k + c] * x;
-                            v += pb[g * k + c] * x;
+                    if self.wire_ste {
+                        // Hard forward selection (argmax candidate), soft backward.
+                        let ca = argmax(&pa[g * k..g * k + k]);
+                        let cb = argmax(&pb[g * k..g * k + k]);
+                        let (sa, ia) = (
+                            layer.cand_layer[j * k + ca] as usize,
+                            layer.cand_idx[j * k + ca] as usize,
+                        );
+                        let (sb, ib) = (
+                            layer.cand_layer[j * k + cb] as usize,
+                            layer.cand_idx[j * k + cb] as usize,
+                        );
+                        for s in s0..s1 {
+                            let u = acts[sa][ia * stride + s];
+                            let v = acts[sb][ib * stride + s];
+                            z[o + s] = nand_relax(self.relaxation, u, v);
                         }
-                        z[o + s] = 1.0 - u * v;
+                    } else {
+                        for s in s0..s1 {
+                            let mut u = 0.0;
+                            let mut v = 0.0;
+                            for c in 0..k {
+                                let src = layer.cand_layer[j * k + c] as usize;
+                                let idx = layer.cand_idx[j * k + c] as usize;
+                                let x = acts[src][idx * stride + s];
+                                u += pa[g * k + c] * x;
+                                v += pb[g * k + c] * x;
+                            }
+                            z[o + s] = nand_relax(self.relaxation, u, v);
+                        }
                     }
                 }
             }
             let z = &self.zs[l];
             let next = &mut self.acts[l + 1];
+            let ste = self.ste;
             for j in 0..net.layers[l].n_out {
                 let o = j * stride;
-                next[o + s0..o + s1].copy_from_slice(&z[o + s0..o + s1]);
+                if ste {
+                    // Hard forward, identity backward (straight-through).
+                    for s in s0..s1 {
+                        next[o + s] = if z[o + s] > 0.5 { 1.0 } else { 0.0 };
+                    }
+                } else {
+                    next[o + s0..o + s1].copy_from_slice(&z[o + s0..o + s1]);
+                }
             }
         }
     }
@@ -473,12 +542,21 @@ impl Work {
         for j in 0..net.layers[last].n_out {
             let o = j * stride;
             for s in s0..s1 {
-                let d = z[o + s] - target[o + s];
+                let out = if self.ste {
+                    if z[o + s] > 0.5 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    z[o + s]
+                };
+                let d = out - target[o + s];
                 total += d * d;
             }
         }
         let mut total = total / n_global;
-        if binarize_weight > 0.0 {
+        if binarize_weight > 0.0 && !self.ste {
             let mut pen = 0.0;
             for l in 1..=last + 1 {
                 let plane = self.acts[l].len() / stride;
@@ -527,10 +605,20 @@ impl Work {
             let scale = 2.0 / (n_last * total_samples).max(1) as f32;
             let z = &self.zs[last];
             let dz = &mut self.dz[last];
+            let ste = self.ste;
             for j in 0..n_last {
                 let o = j * stride;
                 for s in s0..s1 {
-                    dz[o + s] += scale * (z[o + s] - target[o + s]);
+                    let out = if ste {
+                        if z[o + s] > 0.5 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        z[o + s]
+                    };
+                    dz[o + s] += scale * (out - target[o + s]);
                 }
             }
         }
@@ -548,7 +636,7 @@ impl Work {
             }
         }
 
-        let bw = self.binarize_weight;
+        let bw = if self.ste { 0.0 } else { self.binarize_weight };
         if bw > 0.0 {
             for l in 0..net.layers.len() {
                 let plane = self.acts[l + 1].len() / stride;
@@ -578,17 +666,26 @@ impl Work {
                     if dzj == 0.0 {
                         continue;
                     }
-                    let mut u = 0.0;
-                    let mut v = 0.0;
-                    for c in 0..k {
-                        let src = layer.cand_layer[j * k + c] as usize;
-                        let idx = layer.cand_idx[j * k + c] as usize;
-                        let x = acts[src][idx * stride + s];
-                        u += pa[g * k + c] * x;
-                        v += pb[g * k + c] * x;
+                    let (mut u, mut v) = (0.0, 0.0);
+                    if self.wire_ste {
+                        let ca = argmax(&pa[g * k..g * k + k]);
+                        let cb = argmax(&pb[g * k..g * k + k]);
+                        u = acts[layer.cand_layer[j * k + ca] as usize]
+                            [layer.cand_idx[j * k + ca] as usize * stride + s];
+                        v = acts[layer.cand_layer[j * k + cb] as usize]
+                            [layer.cand_idx[j * k + cb] as usize * stride + s];
+                    } else {
+                        for c in 0..k {
+                            let src = layer.cand_layer[j * k + c] as usize;
+                            let idx = layer.cand_idx[j * k + c] as usize;
+                            let x = acts[src][idx * stride + s];
+                            u += pa[g * k + c] * x;
+                            v += pb[g * k + c] * x;
+                        }
                     }
-                    let du = dzj * (-v);
-                    let dv = dzj * (-u);
+                    let (gu, gv) = nand_relax_grad(self.relaxation, u, v);
+                    let du = dzj * gu;
+                    let dv = dzj * gv;
                     for c in 0..k {
                         let src = layer.cand_layer[j * k + c] as usize;
                         let idx = layer.cand_idx[j * k + c] as usize;
@@ -676,6 +773,37 @@ fn build_circuit(net: &Net, alpha: &[f32], beta: &[f32]) -> (Circuit, Circuit) {
         &wire_b,
     );
     (encoder, decoder)
+}
+
+/// Relaxed NAND on soft activations.
+fn nand_relax(relaxation: Relaxation, u: f32, v: f32) -> f32 {
+    match relaxation {
+        Relaxation::Product => 1.0 - u * v,
+        Relaxation::Min => 1.0 - u.min(v),
+        Relaxation::Lukasiewicz => 1.0 - (u + v - 1.0).max(0.0),
+    }
+}
+
+/// Subgradients `(dz/du, dz/dv)` of [`nand_relax`].
+fn nand_relax_grad(relaxation: Relaxation, u: f32, v: f32) -> (f32, f32) {
+    match relaxation {
+        Relaxation::Product => (-v, -u),
+        // Ties send the gradient to `u`, so exactly one side is active.
+        Relaxation::Min => {
+            if u <= v {
+                (-1.0, 0.0)
+            } else {
+                (0.0, -1.0)
+            }
+        }
+        Relaxation::Lukasiewicz => {
+            if u + v > 1.0 {
+                (-1.0, -1.0)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+    }
 }
 
 fn argmax(values: &[f32]) -> usize {
@@ -935,7 +1063,11 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
         .with_context(|| format!("creating run directory {}", out_dir.display()))?;
 
     let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
-    let (train_pool, val_pool, test_pool) = dataset.split_indices(cfg.seed);
+    let (mut train_pool, val_pool, test_pool) = dataset.split_indices(cfg.seed);
+    if let Some(limit) = cfg.train_limit {
+        train_pool.truncate(limit);
+        eprintln!("train_limit: using {} training samples", train_pool.len());
+    }
     if train_pool.is_empty() {
         bail!("no training samples available");
     }
@@ -971,6 +1103,9 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
                 let mut w = Work::new(&trainer.net, cfg.batch, s0, s1);
                 w.binarize_weight = cfg.binarize_weight;
                 w.key_balance_weight = cfg.key_balance_weight;
+                w.ste = cfg.ste;
+                w.wire_ste = cfg.wire_ste;
+                w.relaxation = cfg.relaxation;
                 Some(w)
             } else {
                 None
@@ -1167,6 +1302,8 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
         model.metrics.val_ber = report.ber;
         model.metrics.key_entropy = report.key_entropy;
     }
+    let train_report = crate::ga::evaluate_model(&model, dataset, &train_pool)?;
+    model.metrics.train_ber = train_report.ber;
     let test_report = crate::ga::evaluate_model(&model, dataset, &test_pool)?;
     model.metrics.test_ber = test_report.ber;
     model.metrics.abs_mae = test_report.abs_mae;
@@ -1185,9 +1322,10 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
     )?;
 
     eprintln!(
-        "done: test BER {:.4}, val BER {:.4}, active gates {} / AIG nodes {}",
-        test_report.ber,
+        "done: train BER {:.4}, val BER {:.4}, test BER {:.4}, active gates {} / AIG nodes {}",
+        train_report.ber,
         model.metrics.val_ber,
+        test_report.ber,
         model.metrics.active_gates,
         model.encoder.aig_nodes() + model.decoder.aig_nodes()
     );
@@ -1237,6 +1375,10 @@ mod tests {
             anneal_fraction: 0.85,
             polish_sweeps: 0,
             polish_samples: 32,
+            train_limit: None,
+            ste: false,
+            wire_ste: false,
+            relaxation: Relaxation::Product,
             seed: 3,
             log_every: 0,
             val_every: 0,
@@ -1301,5 +1443,42 @@ mod tests {
         decoder.eval_into(&key, 1, &mut arena, &mut out);
         let got: Vec<f32> = out.iter().map(|v| (v & 1) as f32).collect();
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn relaxations_agree_on_hard_inputs() {
+        // Exported circuits use hard 0/1 wires, where every relaxation must be
+        // exactly NAND; anything else would make training and export disagree.
+        for r in [
+            Relaxation::Product,
+            Relaxation::Min,
+            Relaxation::Lukasiewicz,
+        ] {
+            assert_eq!(nand_relax(r, 0.0, 0.0), 1.0, "{r:?}");
+            assert_eq!(nand_relax(r, 0.0, 1.0), 1.0, "{r:?}");
+            assert_eq!(nand_relax(r, 1.0, 0.0), 1.0, "{r:?}");
+            assert_eq!(nand_relax(r, 1.0, 1.0), 0.0, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn relaxation_gradients_match_finite_differences() {
+        let h = 1e-3f32;
+        // Points away from the kinks (u == v for min, u + v == 1 for Łukasiewicz).
+        for r in [Relaxation::Product, Relaxation::Min] {
+            for &(u, v) in &[(0.2f32, 0.7f32), (0.65f32, 0.3f32), (0.1f32, 0.45f32)] {
+                let (gu, gv) = nand_relax_grad(r, u, v);
+                let fu = (nand_relax(r, u + h, v) - nand_relax(r, u - h, v)) / (2.0 * h);
+                let fv = (nand_relax(r, u, v + h) - nand_relax(r, u, v - h)) / (2.0 * h);
+                assert!((gu - fu).abs() < 1e-2, "{r:?} dz/du {gu} vs {fu}");
+                assert!((gv - fv).abs() < 1e-2, "{r:?} dz/dv {gv} vs {fv}");
+            }
+        }
+    }
+
+    #[test]
+    fn min_relaxation_tie_sends_gradient_to_one_side() {
+        let (gu, gv) = nand_relax_grad(Relaxation::Min, 0.5, 0.5);
+        assert_eq!(gu + gv, -1.0, "tie must not double-count the gradient");
     }
 }

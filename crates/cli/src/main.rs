@@ -99,6 +99,18 @@ enum CliCommand {
         /// Override the candidate-softmax anneal endpoint (config `gain_end`).
         #[arg(long)]
         gain_end: Option<f32>,
+        /// Train on only the first N training samples (diagnostics).
+        #[arg(long)]
+        train_limit: Option<usize>,
+        /// Straight-through binarisation of activations (hard forward).
+        #[arg(long)]
+        ste: bool,
+        /// Straight-through wiring: train with the exported (argmax) wiring.
+        #[arg(long)]
+        wire_ste: bool,
+        /// Gate relaxation: product (default), min, or lukasiewicz.
+        #[arg(long)]
+        relaxation: Option<String>,
     },
     /// Evaluate a saved model on train/val/test.
     Eval {
@@ -362,6 +374,10 @@ fn main() -> Result<()> {
             seed,
             epochs,
             gain_end,
+            train_limit,
+            ste,
+            wire_ste,
+            relaxation,
         } => {
             let mut cfg = nand::NandConfig::from_toml(&config)?;
             if let Some(seed) = seed {
@@ -373,11 +389,35 @@ fn main() -> Result<()> {
             if let Some(gain_end) = gain_end {
                 cfg.gain_end = gain_end;
             }
+            if train_limit.is_some() {
+                cfg.train_limit = train_limit;
+            }
+            if ste {
+                cfg.ste = true;
+            }
+            if wire_ste {
+                cfg.wire_ste = true;
+            }
+            if let Some(relaxation) = relaxation {
+                cfg.relaxation = match relaxation.as_str() {
+                    "product" => nand::Relaxation::Product,
+                    "min" => nand::Relaxation::Min,
+                    "lukasiewicz" => nand::Relaxation::Lukasiewicz,
+                    other => bail!("unknown relaxation {other}"),
+                };
+            }
             cfg.validate()?;
             let dataset = Dataset::load(&data)?;
             println!(
-                "training NAND wiring: {}x{}, {}-bit key, {} epochs (seed {}, gain_end {})",
-                cfg.image_size, cfg.image_size, cfg.key_bits, cfg.epochs, cfg.seed, cfg.gain_end
+                "training NAND wiring: {}x{}, {}-bit key, {} epochs (seed {}, gain_end {}, ste {}, relaxation {:?})",
+                cfg.image_size,
+                cfg.image_size,
+                cfg.key_bits,
+                cfg.epochs,
+                cfg.seed,
+                cfg.gain_end,
+                cfg.ste,
+                cfg.relaxation
             );
             let model = nand::run_nand(&dataset, &cfg, &out)?;
             println!(

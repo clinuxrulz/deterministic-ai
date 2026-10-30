@@ -38,6 +38,14 @@ The demo also ships **`cats16-rgb2`** (2-bit colour, 64 colours, 192-bit key,
 console errors. Loading it requires the rebuilt wasm bundle — an older one
 cannot parse `ColorMode::Rgb2`.
 
+**Best configuration differs from the shipped artifact.** With the Gödel
+relaxation (`relaxation = "min"`, now the default in `configs/cats32_nand.toml`)
+the same trainer reaches test BER **0.1641 ± 0.0093** over seeds 0-9 versus
+0.1730 ± 0.0060 for the product t-norm — paired −0.0089, 95% CI [−0.0159,
+−0.0019]. It costs ~17% more gates (1,843 vs 1,572) because it keeps 77% of
+gates as real two-input logic instead of 65%. The committed demo artifact is
+still the product model; see `docs/experiment.md`, Checkpoint 6.
+
 **Two gate counts, never mix them.** 1,547 is the number of literal NAND gates.
 986 is the AND-node count in an AIG view where inverted wires are free; in CMOS
 an inverter is *not* free, so 986 is a size metric for comparison with synthesis
@@ -174,6 +182,9 @@ cargo run --release -p xorae -- export \
 
 - Fixed hierarchical wiring: `32×32 → 16×32 → 16×16 → 8×16` (128-bit key) and a
   mirrored decoder.
+- The gate is relaxed as `1 - min(u, v)` (Gödel t-norm). Product (`1 - u*v`)
+  and Łukasiewicz are available via `--relaxation`; product is measurably worse
+  and Łukasiewicz fails outright.
 - Each gate gets `n_local + n_global` **candidate wires** (default 9 local +
   3 long-range across layers).
 - Two softmax distributions per gate (`alpha`, `beta`) select its two NAND
@@ -208,27 +219,39 @@ Do not spend time re-running these.
 | Minimax | Not applicable — single-agent problem, no adversary. MCTS is the correct analogue |
 | Non-halving shape reductions (e.g. 192→128) | Strided windows cover the input poorly; colour at 6× (0.2539) was worse than 8× (0.2192) |
 | 512-bit keys | Theory says key size is not the limit (13 bits index 6,000 images) |
-| More capacity (4,736-gate wide model) | Test BER 0.1913 / val 0.1879 vs 0.1722 / 0.1698 narrow, despite lower train MSE (0.078 vs 0.095) — overfits. Confirmed twice, at `gain_end` 32 and 12 (0.2133) |
+| More capacity (4,736-gate wide model) | Test BER 0.1913 / val 0.1879 vs 0.1722 / 0.1698 narrow, despite a *lower* train MSE (0.078 vs 0.095). Confirmed twice, at `gain_end` 32 and 12 (0.2133). Lower MSE with worse BER is objective mismatch, not overfitting — see the 100-image diagnostic |
 | Softer anneal (`gain_end` 8/12/16) | No detectable effect. Seed 42 suggested 0.1679, but paired over seeds 0-4 the difference is +0.0063 ± 0.0113 (t(4)=1.24) and it doubles the spread |
 | 300 epochs instead of 200 | 0.1674 vs 0.1679 on the same seed — far inside the ±0.013 single-run noise band. The default schedule has already converged by ~epoch 150 |
+| Hard activations + straight-through (`--ste`) | 0.3128 / 0.3270 / 0.3198 over seeds 0-2 vs 0.1730 baseline. At `gain = 1` every gate thresholds to 1 and the network starts saturated |
+| Hard wiring + straight-through (`--wire-ste`) | 0.2164 at seed 42 vs 0.1722. Trains the exported argmax circuit directly; plateaus by epoch ~75 |
+| More data / augmentation as an accuracy fix | The model cannot fit 100 images (train BER 0.1741 after ~12,000 updates), so there is no overfitting gap to close |
+| Łukasiewicz gate relaxation | 0.2117 at seed 42 vs 0.1722. Nilpotent: zero gradient whenever `u + v <= 1` |
+| Product t-norm as the default | Gödel `min` is better: paired −0.0089 over 10 seeds, and makes `NAND(x,x)` an exact NOT instead of `1 - x²` |
 
 ## Open threads, in priority order
 
-1. **Colour, 2 bits/channel: shipped.** `--rgb2` gives 64 colours as six bit
+1. **Capacity per gate is the binding constraint.** Two independent
+   measurements: the model cannot fit 100 images (train BER 0.1741 ≈ the 4,000
+   image result), and train/val/test BER are all equal. Objective tweaks do not
+   help (see the ruled-out table). The levers left are what a gate is spent on:
+   free inversions (42% of gates are `Nand(x,x)`), spatial weight sharing, and
+   distillation from a CNN teacher. A margin/hinge loss on bit decisions is the
+   one cheap objective variant not yet tried.
+2. **Colour, 2 bits/channel: shipped.** `--rgb2` gives 64 colours as six bit
    planes (1,536 bits, 192-bit key, 8×); over six paired seeds it cuts absolute
    reconstruction error by 33.7% for 1.91× the gates. It is in the demo as
    `cats16-rgb2`, and `eval` reports both `abs MAE vs original` and the
    palette-relative MAE.
-2. **Gate removal for size.** Exact simplification (below) is done; the
+3. **Gate removal for size.** Exact simplification (below) is done; the
    lossy frontier is not. Removing *active* gates with a tolerance gives a
    size-vs-BER curve, starting from 1,547 rather than 2,165. Nothing tried yet.
-3. **Inversions are 42% of the budget.** In the shipped model 907 of 2,165
+4. **Inversions are 42% of the budget.** In the shipped model 907 of 2,165
    reachable gates are `Nand(x, x)` (i.e. `NOT x`), and only 627 of those are
    distinct wires. A trainer that lets a gate consume an inverted wire for free
    (AIG-style) would spend its gate budget on real logic instead of negation —
    plausibly the largest remaining win, but it touches the model format, the
    evaluator and the exporter.
-4. **Seed-averaged reporting for everything else.** The default config now has
+5. **Seed-averaged reporting for everything else.** The default config now has
    five seeds (0.1730 ± 0.0066) and runs are deterministic, so the harness is
    established. Re-measure the colour and wide configs the same way (5 seeds,
    paired) rather than as single runs — otherwise they repeat the `gain_end`
@@ -250,6 +273,11 @@ Do not spend time re-running these.
   0.287 for 1 bit/channel and 0.083 for 2 bits/channel.
 - **Gate counts:** report literal NAND gates and AIG nodes separately; see the
   note under "Current best model".
+- `train-nand --train-limit N` trains on the first N samples (memorisation
+  diagnostics). `--ste` and `--wire-ste` are the straight-through variants; both
+  are documented negatives, kept as experiment switches.
+- `--relaxation {product,min,lukasiewicz}` selects the gate t-norm. `min`
+  (Gödel) is the current default and is exact on diagonal gates.
 - Solid is pinned to `2.0.0-rc.19` and uses `onSettled` (not `onMount`).
 - Headless Chrome needs `--virtual-time-budget=40000`; 20 s is too short for
   image decode.
