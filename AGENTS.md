@@ -253,9 +253,9 @@ Do not spend time re-running these.
 1. **The key classifies, and an all-NAND circuit can too.** On MNIST, softmax
    regression on the 128-bit key gets **82.0%** (raw pixels: 88.9%), so 8x
    compression costs ~7 points of class information. A NAND circuit on the same
-   keys reaches **75.5%** with **370 gates, depth 3** — no multipliers or
+   keys reaches **77.4%** with **392 gates, depth 3** — no multipliers or
    weights. Size is the lever: 46 collapsed gates give 36.9%, 228 give 70.3%,
-   370 give 75.5%. Distillation from the 82% teacher did *not* help (67.8%),
+   370 give 75.5%, 392 give 77.4%. Distillation from the 82% teacher did *not* help (67.8%),
    and probes plateau by epoch 100, so the circuit is capacity-limited rather
    than label- or epoch-limited. Labels live in `XAE5`; see `classify` and
    `classify-nand`. Next: bigger circuits, or an encoder trained for

@@ -774,7 +774,8 @@ classifier on top of the key. This adds three things:
 | softmax regression | 1,024 raw pixels | 88.9% (train 98.6% — overfits) |
 | softmax regression | **128-bit encoder key** | **82.0%** |
 | NAND circuit, 192,96 hidden / 8 per class | 128-bit key | 68.0% (300 ep) → **70.3%** (600 ep) |
-| NAND circuit, 256,128 hidden / 16 per class | 128-bit key | **75.5%** |
+| NAND circuit, 256,128 hidden / 16 per class | 128-bit key | 75.5% |
+| NAND circuit, 384,192 hidden / 16 per class, 32 candidates | 128-bit key | **77.4%** |
 | NAND circuit, distilled from the 82% teacher | 128-bit key | 67.8% |
 
 ### Circuit size buys accuracy
@@ -784,6 +785,7 @@ classifier on top of the key. This adds three things:
 | 1 | 46 (collapsed) | 36.9% |
 | 8 | 228 | 70.3% |
 | 16 | 370 | 75.5% |
+| 16 (wider hidden, more candidates) | 392 | 77.4% |
 
 The trend is monotone with size, and train accuracy tracks test closely
 (79.4% vs 75.5% in the largest run), so the circuit is underfitting rather
