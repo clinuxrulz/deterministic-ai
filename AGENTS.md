@@ -33,6 +33,13 @@ described by its wiring.
 It is the default entry in `web/public/models/index.json` and is verified in a
 headless browser (128 key bits, 8 samples, no JS errors).
 
+The demo has two tabs: **reconstruct** (the models above) and **draw a digit**
+(MNIST autoencoder + NAND classifier). The digit tab normalises a canvas stroke
+the way MNIST preprocessing does (bbox -> 20x20 -> centre of mass -> 28x28 ->
+nearest-upsample to 32x32), encodes it, and runs the classifier circuit from
+`web/public/digits/classifier.json` via `run_circuit`. `?tab=digits&selftest=1`
+draws a built-in sample and classifies it, which is how it is verified headlessly.
+
 The demo also ships **`cats16-rgb2`** (2-bit colour, 64 colours, 192-bit key,
 2,345 gates), verified the same way: 192 key bits, `abs MAE 23.61%`, zero
 console errors. Loading it requires the rebuilt wasm bundle — an older one
@@ -173,7 +180,7 @@ cargo run --release -p xorae -- export \
 | `prune` | Lossy size pass: bypass gates while BER stays within `--tolerance`, down to `--target` gates |
 | `prior` | Fit Bernoulli / autoregressive priors over the key space, sample, decode, report NLL and round-trip |
 | `classify` | Softmax regression on keys or raw pixels; accuracy + confusion matrix |
-| `classify-nand` | Train a NAND circuit classifier on keys (grouped vote outputs) |
+| `classify-nand` | Train a NAND circuit classifier on keys (grouped vote outputs; `--distill` accepts a `classify` model) |
 | `export` | Copy a model into `web/public/models/` |
 | `export-samples` | 32×32 RGB previews for the demo gallery |
 
@@ -246,9 +253,11 @@ Do not spend time re-running these.
 1. **The key classifies, and an all-NAND circuit can too.** On MNIST, softmax
    regression on the 128-bit key gets **82.0%** (raw pixels: 88.9%), so 8x
    compression costs ~7 points of class information. A NAND circuit on the same
-   keys reaches **70.3%** with **228 gates, depth 3** — no multipliers or
-   weights. Distillation from the 82% teacher did *not* help (67.8%), so the
-   circuit is capacity-limited. Labels live in `XAE5`; see `classify` and
+   keys reaches **75.5%** with **370 gates, depth 3** — no multipliers or
+   weights. Size is the lever: 46 collapsed gates give 36.9%, 228 give 70.3%,
+   370 give 75.5%. Distillation from the 82% teacher did *not* help (67.8%),
+   and probes plateau by epoch 100, so the circuit is capacity-limited rather
+   than label- or epoch-limited. Labels live in `XAE5`; see `classify` and
    `classify-nand`. Next: bigger circuits, or an encoder trained for
    classification as well as reconstruction.
 2. **Key space is generative, not just a codebook.** `xorae prior` fits a

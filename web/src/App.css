@@ -333,3 +333,126 @@ button:focus,
 #root {
   min-height: 100%;
 }
+
+/* Tabs + draw-a-digit lab */
+.tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  flex-wrap: wrap;
+}
+
+.tab {
+  border: 1px solid var(--line, #2a2f3a);
+  background: transparent;
+  color: var(--muted, #9aa4b5);
+  padding: 0.5rem 0.9rem;
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: var(--accent, #6ea8fe);
+  border-color: var(--accent, #6ea8fe);
+  color: #0b0d12;
+  font-weight: 600;
+}
+
+.digitlab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.draw-panel,
+.digit-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.draw-canvas {
+  width: 100%;
+  max-width: 380px;
+  aspect-ratio: 1;
+  border-radius: 14px;
+  border: 1px solid var(--line, #2a2f3a);
+  background: #0b0d12;
+  touch-action: none;
+  cursor: crosshair;
+  display: block;
+}
+
+.draw-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.digit-prediction {
+  font-size: clamp(4rem, 18vw, 7rem);
+  line-height: 1;
+  margin: 0;
+  font-weight: 700;
+  color: var(--accent, #6ea8fe);
+  text-align: center;
+}
+
+.votes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.vote {
+  display: grid;
+  grid-template-columns: 1.25rem 1fr 1.75rem;
+  align-items: center;
+  gap: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.vote-label {
+  color: var(--muted, #9aa4b5);
+  text-align: right;
+}
+
+.vote-bar {
+  height: 0.6rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.vote-fill {
+  height: 100%;
+  background: var(--accent, #6ea8fe);
+  border-radius: 999px;
+  transition: width 120ms ease-out;
+}
+
+.vote-count {
+  color: var(--muted, #9aa4b5);
+  font-size: 0.8rem;
+}
+
+.digit-preview {
+  width: 128px;
+  height: 128px;
+  image-rendering: pixelated;
+  border-radius: 10px;
+  border: 1px solid var(--line, #2a2f3a);
+  align-self: center;
+}
+
+@media (max-width: 900px) {
+  .digitlab {
+    grid-template-columns: 1fr;
+  }
+
+  .draw-canvas {
+    max-width: none;
+  }
+}

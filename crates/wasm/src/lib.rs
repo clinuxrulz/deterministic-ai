@@ -9,10 +9,32 @@ use xorae_core::preprocess::{
     rgba_to_bits, rgba_to_bits_palette, rgba_to_bits_rgb1, rgba_to_bits_rgb2, BinarizeMode,
     PreprocessOptions,
 };
-use xorae_core::{ColorMode, Model};
+use xorae_core::{Circuit, ColorMode, Model};
 
 fn js_error(message: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&message.to_string()).into()
+}
+
+/// Run a standalone circuit (e.g. a classifier trained on encoder keys).
+///
+/// The circuit JSON is the serialised `Circuit` written by `classify-nand`:
+/// `{ n_inputs, gates, outputs }`. Returns one bit per output.
+#[wasm_bindgen]
+pub fn run_circuit(circuit_json: &str, inputs: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let circuit: Circuit = serde_json::from_str(circuit_json).map_err(js_error)?;
+    circuit.validate().map_err(js_error)?;
+    if inputs.len() != circuit.n_inputs as usize {
+        return Err(js_error(format!(
+            "circuit expects {} inputs, got {}",
+            circuit.n_inputs,
+            inputs.len()
+        )));
+    }
+    let planes: Vec<u64> = inputs.iter().map(|&b| u64::from(b & 1)).collect();
+    let mut arena = Vec::new();
+    let mut out = Vec::new();
+    circuit.eval_into(&planes, 1, &mut arena, &mut out);
+    Ok(out.iter().map(|w| (w & 1) as u8).collect())
 }
 
 fn parse_mode(mode: &str) -> Result<BinarizeMode, String> {

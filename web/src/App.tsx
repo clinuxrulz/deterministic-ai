@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, onSettled, Repeat, Show } from "solid-js";
-import init, { ModelHandle } from "./wasm/pkg/xorae_wasm";
+import init, { ModelHandle, run_circuit } from "./wasm/pkg/xorae_wasm";
 import "./App.css";
 
 const wasmReady = init();
@@ -66,6 +66,10 @@ function runImage(image: HTMLImageElement, model: ModelHandle): InferenceResult 
 }
 
 export default function App() {
+  const params = new URLSearchParams(window.location.search);
+  const [tab, setTab] = createSignal<"reconstruct" | "digits">(
+    params.get("tab") === "digits" ? "digits" : "reconstruct",
+  );
   const [models, setModels] = createSignal<ModelEntry[]>([]);
   const [samples, setSamples] = createSignal<SampleEntry[]>([]);
   const [model, setModel] = createSignal<ModelHandle | null>(null);
@@ -292,6 +296,22 @@ export default function App() {
         </div>
       </header>
 
+      <nav class="tabs" aria-label="mode">
+        <button
+          class={tab() === "reconstruct" ? "tab active" : "tab"}
+          onClick={() => setTab("reconstruct")}
+        >
+          reconstruct
+        </button>
+        <button
+          class={tab() === "digits" ? "tab active" : "tab"}
+          onClick={() => setTab("digits")}
+        >
+          draw a digit
+        </button>
+      </nav>
+
+      <Show when={tab() === "reconstruct"} fallback={<DigitLab />}>
       <p class="status">{status()}</p>
 
       <Show when={model()}>
@@ -392,6 +412,7 @@ export default function App() {
           </p>
         </article>
       </section>
+      </Show>
     </main>
   );
 }
@@ -447,5 +468,354 @@ function BitGrid(props: { bits: Uint8Array; diff: Uint8Array }) {
         }}
       </Repeat>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Draw-a-digit tab: a hand-drawn digit is normalised the way MNIST is
+// (bounding box -> 20x20 -> centre of mass -> 28x28 -> 32x32), encoded by the
+// MNIST autoencoder, then classified by a NAND circuit over the 128-bit key.
+// ---------------------------------------------------------------------------
+
+type DigitMeta = { classes: number; group_size: number; gates: number; test_accuracy: number };
+type DigitSample = { label: number; size: number; bits: string };
+
+const DIGIT_CANVAS = 280;
+const DIGIT_BG = "#0b0d12";
+const DIGIT_INK = "#ffffff";
+
+function toModelBits(source: HTMLCanvasElement): Uint8Array | null {
+  const w = source.width;
+  const h = source.height;
+  const context = source.getContext("2d", { willReadFrequently: true });
+  if (!context) return null;
+  const data = context.getImageData(0, 0, w, h).data;
+
+  let minX = w;
+  let minY = h;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const i = (y * w + x) * 4;
+      // White ink on a dark canvas.
+      if (data[i + 3] > 32 && data[i] >= 128) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return null;
+
+  const boxW = maxX - minX + 1;
+  const boxH = maxY - minY + 1;
+  const scale = 20 / Math.max(boxW, boxH);
+  const drawW = Math.max(1, Math.round(boxW * scale));
+  const drawH = Math.max(1, Math.round(boxH * scale));
+
+  const small = document.createElement("canvas");
+  small.width = 28;
+  small.height = 28;
+  const sctx = small.getContext("2d", { willReadFrequently: true });
+  if (!sctx) return null;
+  sctx.fillStyle = "#000000";
+  sctx.fillRect(0, 0, 28, 28);
+  sctx.imageSmoothingEnabled = true;
+  sctx.drawImage(
+    source,
+    minX,
+    minY,
+    boxW,
+    boxH,
+    Math.round((28 - drawW) / 2),
+    Math.round((28 - drawH) / 2),
+    drawW,
+    drawH,
+  );
+
+  // Centre by centre of mass, as the MNIST preprocessing does.
+  const px = sctx.getImageData(0, 0, 28, 28).data;
+  let sx = 0;
+  let sy = 0;
+  let count = 0;
+  for (let y = 0; y < 28; y += 1) {
+    for (let x = 0; x < 28; x += 1) {
+      if (px[(y * 28 + x) * 4] >= 128) {
+        sx += x;
+        sy += y;
+        count += 1;
+      }
+    }
+  }
+  if (count === 0) return null;
+  const dx = Math.round(13.5 - sx / count);
+  const dy = Math.round(13.5 - sy / count);
+
+  const centred = document.createElement("canvas");
+  centred.width = 28;
+  centred.height = 28;
+  const cctx = centred.getContext("2d", { willReadFrequently: true });
+  if (!cctx) return null;
+  cctx.fillStyle = "#000000";
+  cctx.fillRect(0, 0, 28, 28);
+  cctx.drawImage(small, dx, dy);
+
+  // Threshold, then nearest-upsample 28 -> 32 to match the dataset loader.
+  const src = cctx.getImageData(0, 0, 28, 28).data;
+  const bits = new Uint8Array(32 * 32);
+  for (let y = 0; y < 32; y += 1) {
+    const sy2 = Math.min(27, Math.floor((y * 28) / 32));
+    for (let x = 0; x < 32; x += 1) {
+      const sx2 = Math.min(27, Math.floor((x * 28) / 32));
+      bits[y * 32 + x] = src[(sy2 * 28 + sx2) * 4] >= 128 ? 1 : 0;
+    }
+  }
+  return bits;
+}
+
+function DigitLab() {
+  const params = new URLSearchParams(window.location.search);
+  let drawRef: HTMLCanvasElement | undefined;
+  let previewRef: HTMLCanvasElement | undefined;
+  let model: ModelHandle | null = null;
+  let meta: DigitMeta | null = null;
+  let circuitJson = "";
+  let sample: DigitSample | null = null;
+  let drawing = false;
+  let lastPoint: { x: number; y: number } | null = null;
+
+  const [status, setStatus] = createSignal("loading digit model…");
+  const [prediction, setPrediction] = createSignal<number | null>(null);
+  const [votes, setVotes] = createSignal<number[]>([]);
+  const [groupSize, setGroupSize] = createSignal(16);
+
+  const clear = () => {
+    const canvas = drawRef;
+    if (!canvas) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.fillStyle = DIGIT_BG;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    setPrediction(null);
+    setVotes([]);
+  };
+
+  const paintBits = (bits: Uint8Array, side: number) => {
+    const canvas = drawRef;
+    if (!canvas) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    const tile = document.createElement("canvas");
+    tile.width = side;
+    tile.height = side;
+    const tctx = tile.getContext("2d");
+    if (!tctx) return;
+    const img = tctx.createImageData(side, side);
+    for (let i = 0; i < side * side; i += 1) {
+      const on = bits[i] === 1;
+      const value = on ? 255 : 0;
+      img.data[i * 4] = value;
+      img.data[i * 4 + 1] = value;
+      img.data[i * 4 + 2] = value;
+      img.data[i * 4 + 3] = on ? 255 : 0;
+    }
+    tctx.putImageData(img, 0, 0);
+    context.fillStyle = DIGIT_BG;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.imageSmoothingEnabled = false;
+    context.drawImage(tile, 0, 0, canvas.width, canvas.height);
+  };
+
+  const drawPreview = (bits: Uint8Array) => {
+    const canvas = previewRef;
+    if (!canvas) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    const side = Math.round(Math.sqrt(bits.length));
+    const cell = canvas.width / side;
+    context.fillStyle = "#05070a";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "#e8ecf5";
+    for (let y = 0; y < side; y += 1) {
+      for (let x = 0; x < side; x += 1) {
+        if (bits[y * side + x] === 1) {
+          context.fillRect(x * cell, y * cell, Math.ceil(cell), Math.ceil(cell));
+        }
+      }
+    }
+  };
+
+  const classify = () => {
+    const canvas = drawRef;
+    if (!canvas || !model || !meta) return;
+    const bits = toModelBits(canvas);
+    if (!bits) {
+      setPrediction(null);
+      setVotes([]);
+      return;
+    }
+    drawPreview(bits);
+    const key = model.encode(bits);
+    const out = run_circuit(circuitJson, key);
+    const classes = meta.classes;
+    const group = meta.group_size;
+    const scores = Array.from({ length: classes }, (_, c) => {
+      let total = 0;
+      for (let j = 0; j < group; j += 1) total += out[c * group + j] ?? 0;
+      return total;
+    });
+    let best = 0;
+    for (let c = 1; c < classes; c += 1) if (scores[c] > scores[best]) best = c;
+    setGroupSize(group);
+    setVotes(scores);
+    setPrediction(best);
+  };
+
+  const selfTest = () => {
+    if (!sample) return;
+    const bits = new Uint8Array(sample.size * sample.size);
+    for (let i = 0; i < bits.length; i += 1) bits[i] = sample.bits[i] === "1" ? 1 : 0;
+    paintBits(bits, sample.size);
+    classify();
+  };
+
+  const pointOf = (event: PointerEvent): { x: number; y: number } => {
+    const canvas = drawRef as HTMLCanvasElement;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: ((event.clientX - rect.left) / rect.width) * canvas.width,
+      y: ((event.clientY - rect.top) / rect.height) * canvas.height,
+    };
+  };
+
+  const onDown = (event: PointerEvent) => {
+    const canvas = drawRef;
+    if (!canvas) return;
+    event.preventDefault();
+    canvas.setPointerCapture(event.pointerId);
+    drawing = true;
+    lastPoint = pointOf(event);
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.fillStyle = DIGIT_INK;
+    context.beginPath();
+    context.arc(lastPoint.x, lastPoint.y, 10, 0, Math.PI * 2);
+    context.fill();
+  };
+
+  const onMove = (event: PointerEvent) => {
+    if (!drawing || !lastPoint) return;
+    event.preventDefault();
+    const canvas = drawRef;
+    if (!canvas) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    const point = pointOf(event);
+    context.strokeStyle = DIGIT_INK;
+    context.lineWidth = 20;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.beginPath();
+    context.moveTo(lastPoint.x, lastPoint.y);
+    context.lineTo(point.x, point.y);
+    context.stroke();
+    lastPoint = point;
+  };
+
+  const onUp = () => {
+    if (!drawing) return;
+    drawing = false;
+    lastPoint = null;
+    classify();
+  };
+
+  onSettled(() => {
+    void (async () => {
+      try {
+        const [modelJson, metaJson, circuitText, sampleJson] = await Promise.all([
+          fetch(asset("models/mnist32.json")).then((r) => {
+            if (!r.ok) throw new Error(`mnist32.json: HTTP ${r.status}`);
+            return r.text();
+          }),
+          fetchJson<DigitMeta>(asset("digits/meta.json")),
+          fetch(asset("digits/classifier.json")).then((r) => {
+            if (!r.ok) throw new Error(`classifier.json: HTTP ${r.status}`);
+            return r.text();
+          }),
+          fetchJson<DigitSample>(asset("digits/sample.json")),
+        ]);
+        await wasmReady;
+        model = new ModelHandle(modelJson);
+        meta = metaJson;
+        circuitJson = circuitText;
+        sample = sampleJson;
+        setGroupSize(metaJson.group_size);
+        clear();
+        setStatus(
+          `ready · ${metaJson.gates} NAND gates · ${(metaJson.test_accuracy * 100).toFixed(1)}% on MNIST test`,
+        );
+        if (params.get("selftest") === "1") {
+          selfTest();
+          setStatus(`self-test: drew a "${sampleJson.label}" and classified it`);
+        }
+      } catch (error) {
+        setStatus(`could not load the digit model: ${String(error)}`);
+      }
+    })();
+  });
+
+  return (
+    <section class="digitlab">
+      <div class="draw-panel">
+        <canvas
+          ref={drawRef}
+          class="draw-canvas"
+          width={DIGIT_CANVAS}
+          height={DIGIT_CANVAS}
+          onPointerDown={onDown}
+          onPointerMove={onMove}
+          onPointerUp={onUp}
+          onPointerCancel={onUp}
+          onPointerLeave={onUp}
+        />
+        <div class="draw-actions">
+          <button class="sample" onClick={clear}>
+            clear
+          </button>
+          <button class="sample" onClick={() => void classify()}>
+            read digit
+          </button>
+          <button class="sample" onClick={selfTest}>
+            test sample
+          </button>
+        </div>
+        <p class="status">{status()}</p>
+      </div>
+
+      <div class="digit-panel">
+        <p class="digit-prediction">{prediction() === null ? "–" : prediction()}</p>
+        <p class="hint">predicted digit</p>
+        <div class="votes">
+          <For each={votes()}>
+            {(score, index) => (
+              <div class="vote">
+                <span class="vote-label">{index()}</span>
+                <div class="vote-bar">
+                  <div
+                    class="vote-fill"
+                    style={{ width: `${(score / Math.max(1, groupSize())) * 100}%` }}
+                  />
+                </div>
+                <span class="vote-count">{score}</span>
+              </div>
+            )}
+          </For>
+        </div>
+        <canvas ref={previewRef} class="digit-preview" width={128} height={128} />
+        <p class="hint">what the circuit sees · 32×32 thresholded</p>
+      </div>
+    </section>
   );
 }

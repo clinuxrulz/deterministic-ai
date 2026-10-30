@@ -41,6 +41,12 @@
       "name": "Toy 8×8 · strict XOR",
       "path": "models/toy.json",
       "description": "16 patterns from a 4-dimensional GF(2) subspace; exact reconstruction."
+    },
+    {
+      "id": "mnist32",
+      "name": "MNIST digits 32×32 · NAND-only",
+      "path": "models/mnist32.json",
+      "description": "Binarized MNIST, 128-bit key, 1,287 gates after exact simplification. Source of the keys used by the draw-a-digit tab."
     }
   ]
 }

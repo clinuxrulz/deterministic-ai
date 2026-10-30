@@ -773,9 +773,22 @@ classifier on top of the key. This adds three things:
 |---|---|---|
 | softmax regression | 1,024 raw pixels | 88.9% (train 98.6% — overfits) |
 | softmax regression | **128-bit encoder key** | **82.0%** |
-| NAND circuit, 300 epochs | 128-bit key | 68.0% |
-| NAND circuit, 600 epochs | 128-bit key | **70.3%** |
+| NAND circuit, 192,96 hidden / 8 per class | 128-bit key | 68.0% (300 ep) → **70.3%** (600 ep) |
+| NAND circuit, 256,128 hidden / 16 per class | 128-bit key | **75.5%** |
 | NAND circuit, distilled from the 82% teacher | 128-bit key | 67.8% |
+
+### Circuit size buys accuracy
+
+| output gates per class | gates after simplify | test accuracy |
+|---|---|---|
+| 1 | 46 (collapsed) | 36.9% |
+| 8 | 228 | 70.3% |
+| 16 | 370 | 75.5% |
+
+The trend is monotone with size, and train accuracy tracks test closely
+(79.4% vs 75.5% in the largest run), so the circuit is underfitting rather
+than overfitting: more gates, not more epochs, is the lever. Probes plateaued
+by epoch 100 in every run.
 
 Two findings:
 
@@ -822,3 +835,20 @@ cargo run --release -p xorae -- classify-nand \
   --out runs/mnist_nand_clf.json \
   --hidden 192,96 --epochs 600 --candidates 16 --group-size 8 --relaxation min
 ```
+
+### The demo
+
+`web/` has a second tab: **draw a digit**. A pointer-drawn stroke on a canvas is
+normalised the MNIST way (ink bounding box, scale to 20x20, centre of mass,
+28x28, nearest-upsample to 32x32), encoded by the MNIST autoencoder, and
+classified by the 370-gate NAND circuit. The tab shows the predicted digit, the
+per-class vote (0..16) and what the circuit actually sees.
+
+Assets: `web/public/models/mnist32.json` (autoencoder),
+`web/public/digits/classifier.json` (the circuit),
+`web/public/digits/meta.json` (classes, group size, gates, accuracy),
+`web/public/digits/sample.json` (one MNIST test digit for the self-test).
+
+Verified headlessly with
+`?tab=digits&selftest=1`: the built-in 7 is drawn, normalised, encoded and
+classified as **7** (15/16 votes), zero console errors.

@@ -1,0 +1,8 @@
+{
+  "classes": 10,
+  "group_size": 16,
+  "gates": 370,
+  "test_accuracy": 0.7545,
+  "inputs": 128,
+  "note": "NAND circuit trained on MNIST encoder keys"
+}
