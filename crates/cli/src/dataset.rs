@@ -40,9 +40,26 @@ pub struct Dataset {
     pub channels: usize,
     pub is_test: Vec<bool>,
     pub split_mode: SplitMode,
+    /// One label per image. Empty when the dataset carries no labels.
+    pub labels: Vec<u8>,
+    /// Number of distinct labels (0 when unlabelled).
+    pub label_count: usize,
 }
 
 impl Dataset {
+    /// Attach per-image labels (written as `XAE5`).
+    pub fn with_labels(mut self, labels: Vec<u8>, label_count: usize) -> Self {
+        assert_eq!(labels.len(), self.n);
+        self.labels = labels;
+        self.label_count = label_count;
+        self
+    }
+
+    /// Whether this dataset carries per-image labels.
+    pub fn has_labels(&self) -> bool {
+        !self.labels.is_empty()
+    }
+
     /// Number of pixels per image.
     pub fn pixels(&self) -> usize {
         self.size * self.size
@@ -111,6 +128,8 @@ impl Dataset {
             channels: 1,
             is_test,
             split_mode,
+            labels: Vec::new(),
+            label_count: 0,
         }
     }
 
@@ -147,6 +166,8 @@ impl Dataset {
             channels: 1,
             is_test,
             split_mode,
+            labels: Vec::new(),
+            label_count: 0,
         }
     }
 
@@ -180,6 +201,8 @@ impl Dataset {
             channels: 3,
             is_test,
             split_mode,
+            labels: Vec::new(),
+            label_count: 0,
         }
     }
 
@@ -213,6 +236,8 @@ impl Dataset {
             channels: 6,
             is_test,
             split_mode,
+            labels: Vec::new(),
+            label_count: 0,
         }
     }
 
@@ -281,7 +306,7 @@ impl Dataset {
         let file =
             File::create(path).with_context(|| format!("creating dataset {}", path.display()))?;
         let mut w = BufWriter::new(file);
-        w.write_all(b"XAE4")?;
+        w.write_all(if self.has_labels() { b"XAE5" } else { b"XAE4" })?;
         w.write_all(&(self.size as u32).to_le_bytes())?;
         w.write_all(&(self.n as u32).to_le_bytes())?;
         w.write_all(&[match self.color_mode {
@@ -308,6 +333,10 @@ impl Dataset {
         }
         let flags: Vec<u8> = self.is_test.iter().map(|&b| u8::from(b)).collect();
         w.write_all(&flags)?;
+        if self.has_labels() {
+            w.write_all(&[self.label_count.min(u8::MAX as usize) as u8])?;
+            w.write_all(&self.labels)?;
+        }
         w.flush()?;
         Ok(())
     }
@@ -322,7 +351,9 @@ impl Dataset {
         if &magic == b"XAE2" {
             return load_v2(&mut r, path);
         }
-        let version = if &magic == b"XAE4" {
+        let version = if &magic == b"XAE5" {
+            5
+        } else if &magic == b"XAE4" {
             4
         } else if &magic == b"XAE3" {
             3
@@ -394,6 +425,16 @@ impl Dataset {
         r.read_exact(&mut flags)?;
         let is_test = flags.iter().map(|&b| b != 0).collect();
 
+        let (label_count, labels) = if version >= 5 {
+            let mut count = [0u8; 1];
+            r.read_exact(&mut count)?;
+            let mut labels = vec![0u8; n];
+            r.read_exact(&mut labels)?;
+            (count[0] as usize, labels)
+        } else {
+            (0, Vec::new())
+        };
+
         Ok(Self {
             size,
             n,
@@ -407,6 +448,8 @@ impl Dataset {
             channels,
             is_test,
             split_mode,
+            label_count,
+            labels,
         })
     }
 }
@@ -465,6 +508,8 @@ fn load_v2<R: Read>(r: &mut R, path: &Path) -> Result<Dataset> {
         channels: 1,
         is_test,
         split_mode,
+        labels: Vec::new(),
+        label_count: 0,
     })
 }
 
@@ -732,6 +777,8 @@ pub fn load_mnist(
 ) -> Result<Dataset> {
     let (train_images, rows, cols) = read_idx_images(&dir.join("train-images-idx3-ubyte"))?;
     let (test_images, _, _) = read_idx_images(&dir.join("t10k-images-idx3-ubyte"))?;
+    let train_labels = read_idx_labels(&dir.join("train-labels-idx1-ubyte"))?;
+    let test_labels = read_idx_labels(&dir.join("t10k-labels-idx1-ubyte"))?;
     let per_image = rows * cols;
     let n_train = train_images.len() / per_image;
     let n_test = test_images.len() / per_image;
@@ -740,6 +787,7 @@ pub fn load_mnist(
     let mut bit_rows = Vec::with_capacity(take + n_test);
     let mut gray = Vec::with_capacity((take + n_test) * size * size);
     let mut is_test = Vec::with_capacity(take + n_test);
+    let mut labels = Vec::with_capacity(take + n_test);
     let mut image = vec![0u8; per_image];
     for (set, count, flag) in [
         (train_images.as_slice(), take, false),
@@ -753,14 +801,31 @@ pub fn load_mnist(
             is_test.push(flag);
         }
     }
+    labels.extend_from_slice(&train_labels[..take]);
+    labels.extend_from_slice(&test_labels[..n_test.min(test_labels.len())]);
 
-    Ok(Dataset::from_parts(
-        size,
-        bit_rows,
-        gray,
-        is_test,
-        SplitMode::Hash,
-    ))
+    Ok(Dataset::from_parts(size, bit_rows, gray, is_test, SplitMode::Hash).with_labels(labels, 10))
+}
+
+/// Read an IDX label file (one label byte per image).
+fn read_idx_labels(path: &Path) -> Result<Vec<u8>> {
+    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if data.len() < 8 {
+        bail!("{} is too short to be an IDX label file", path.display());
+    }
+    let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    if magic != 2049 {
+        bail!("{}: unexpected IDX label magic {magic}", path.display());
+    }
+    let n = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    if data.len() != 8 + n {
+        bail!(
+            "{}: length {} does not match {n} labels",
+            path.display(),
+            data.len()
+        );
+    }
+    Ok(data[8..].to_vec())
 }
 
 /// Read an IDX image file: returns (pixels, rows, cols).

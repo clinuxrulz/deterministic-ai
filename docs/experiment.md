@@ -748,3 +748,77 @@ cargo run --release -p xorae -- train-nand --config configs/mnist32_nand.toml \
 cargo run --release -p xorae -- prior --model runs/mnist32/model.json \
   --data data/mnist32.bin --out runs/prior_mnist --samples 32
 ```
+## Checkpoint 9 (2026-10-30): labels, a classifier, and an all-NAND classifier
+
+The autoencoder produces no labels, so "recognise the digit" needed a
+classifier on top of the key. This adds three things:
+
+1. **`XAE5` datasets carry labels** (`label_count u8` + `n` label bytes after
+   the split flags). `XAE4` still loads with empty labels, and the writer only
+   emits `XAE5` when labels exist, so every existing dataset is unchanged.
+   `preprocess --mnist-dir` now reads `*-labels-idx1-ubyte`.
+2. **`xorae classify`** trains multinomial logistic regression on either the
+   128-bit key or the raw 1,024 input bits, and prints accuracy plus a
+   confusion matrix.
+3. **`xorae classify-nand`** trains a NAND circuit over the key bits:
+   `128 -> hidden.. -> classes x group`, wiring chosen by an annealed softmax
+   over candidate wires (same relaxation machinery as the autoencoder), class
+   score = **sum of its output group** (a vote), loss = cross-entropy over the
+   group sums. The argmax wiring is materialised as a literal `Circuit`,
+   exact-simplified, and scored on the held-out split.
+
+### Accuracy, MNIST 32x32 (10,000 test images)
+
+| model | inputs | test accuracy |
+|---|---|---|
+| softmax regression | 1,024 raw pixels | 88.9% (train 98.6% — overfits) |
+| softmax regression | **128-bit encoder key** | **82.0%** |
+| NAND circuit, 300 epochs | 128-bit key | 68.0% |
+| NAND circuit, 600 epochs | 128-bit key | **70.3%** |
+| NAND circuit, distilled from the 82% teacher | 128-bit key | 67.8% |
+
+Two findings:
+
+- **The key is a good feature.** 82.0% from 128 bits against 88.9% from 1,024
+  pixels means the 8x compression loses about 7 points of class information —
+  the code is semantic, not just an image codebook.
+- **A pure gate circuit gets to ~70% with 228 NAND gates**, and the vote
+  read-out matters: with one output bit per class the same machinery stalled at
+  21-37% and collapsed (394 -> 46 gates), while groups of 8 per class give a
+  healthy prediction histogram and 228 active gates.
+
+Distillation was a negative: soft targets from the 82% teacher scored 67.8%,
+below one-hot. The circuit is capacity-limited, not label-limited, so softer
+targets buy nothing at this size.
+
+### Cost of the classifier
+
+| | value |
+|---|---|
+| NAND gates after simplification | **228** |
+| Logic depth | **3** |
+| Max fanout | 7 (mean 1.7) |
+| Inputs -> outputs | 128 -> 80 |
+
+No multipliers, no weights, no memory: the parameters are the wiring. The
+equivalent softmax model needs 1,280 MACs and 1.3k parameters. A full
+"pixels -> key -> label" pipeline is encoder (~550 gates) + classifier (228),
+depth ~6 — roughly 800 LUTs on an FPGA.
+
+Caveats: the wiring is arbitrary, so an ASIC router may dominate area; and 70%
+is 12 points behind a linear read-out on the same 128 bits. Improvements worth
+trying: larger circuit, class weights, or training the encoder for
+classification as well as reconstruction (the key is currently optimised for
+reconstruction only).
+
+### Reproduce
+
+```bash
+cargo run --release -p xorae -- classify \
+  --model runs/mnist32/model.json --data data/mnist32.bin \
+  --out runs/mnist_classifier.json
+cargo run --release -p xorae -- classify-nand \
+  --model runs/mnist32/model.json --data data/mnist32.bin \
+  --out runs/mnist_nand_clf.json \
+  --hidden 192,96 --epochs 600 --candidates 16 --group-size 8 --relaxation min
+```

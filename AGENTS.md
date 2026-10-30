@@ -172,6 +172,8 @@ cargo run --release -p xorae -- export \
 | `simplify` | Exact post-pass on a model: constant folding, CSE, dead-gate removal (`--verify`, `--verify-random`) |
 | `prune` | Lossy size pass: bypass gates while BER stays within `--tolerance`, down to `--target` gates |
 | `prior` | Fit Bernoulli / autoregressive priors over the key space, sample, decode, report NLL and round-trip |
+| `classify` | Softmax regression on keys or raw pixels; accuracy + confusion matrix |
+| `classify-nand` | Train a NAND circuit classifier on keys (grouped vote outputs) |
 | `export` | Copy a model into `web/public/models/` |
 | `export-samples` | 32×32 RGB previews for the demo gallery |
 
@@ -241,35 +243,43 @@ Do not spend time re-running these.
 
 ## Open threads, in priority order
 
-1. **Key space is generative, not just a codebook.** `xorae prior` fits a
+1. **The key classifies, and an all-NAND circuit can too.** On MNIST, softmax
+   regression on the 128-bit key gets **82.0%** (raw pixels: 88.9%), so 8x
+   compression costs ~7 points of class information. A NAND circuit on the same
+   keys reaches **70.3%** with **228 gates, depth 3** — no multipliers or
+   weights. Distillation from the 82% teacher did *not* help (67.8%), so the
+   circuit is capacity-limited. Labels live in `XAE5`; see `classify` and
+   `classify-nand`. Next: bigger circuits, or an encoder trained for
+   classification as well as reconstruction.
+2. **Key space is generative, not just a codebook.** `xorae prior` fits a
    causal linear AR model over the 128-bit keys: on MNIST it reaches 0.318
    bits/bit held-out (about 41 bits of entropy) and its samples round-trip as
    well as real keys (0.806 vs 0.801) while decoding to recognisable digits.
    Next steps if this is the direction: a nonlinear/RNN prior should cut the
    NLL further, and a GAN on keys is now defensible rather than speculative.
-2. **Capacity per gate is the binding constraint.** Two independent
+3. **Capacity per gate is the binding constraint.** Two independent
    measurements: the model cannot fit 100 images (train BER 0.1741 ≈ the 4,000
    image result), and train/val/test BER are all equal. Objective tweaks do not
    help (see the ruled-out table). The levers left are what a gate is spent on:
    free inversions (42% of gates are `Nand(x,x)`), spatial weight sharing, and
    distillation from a CNN teacher. A margin/hinge loss on bit decisions is the
    one cheap objective variant not yet tried.
-3. **Colour, 2 bits/channel: shipped.** `--rgb2` gives 64 colours as six bit
+4. **Colour, 2 bits/channel: shipped.** `--rgb2` gives 64 colours as six bit
    planes (1,536 bits, 192-bit key, 8×); over six paired seeds it cuts absolute
    reconstruction error by 33.7% for 1.91× the gates. It is in the demo as
    `cats16-rgb2`, and `eval` reports both `abs MAE vs original` and the
    palette-relative MAE.
-4. **Size-vs-BER frontier: first pass done.** `xorae prune` gives product
+5. **Size-vs-BER frontier: first pass done.** `xorae prune` gives product
    0.1749 at 1,400 gates and 0.1775 at 1,300 (from 0.1722 at 1,547), steepening
    below 1,200. The greedy bypass rule is crude — better pruning (retrain or
    fine-tune after each cut, or remove whole cones) could move this curve.
-5. **Inversions are 42% of the budget.** In the shipped model 907 of 2,165
+6. **Inversions are 42% of the budget.** In the shipped model 907 of 2,165
    reachable gates are `Nand(x, x)` (i.e. `NOT x`), and only 627 of those are
    distinct wires. A trainer that lets a gate consume an inverted wire for free
    (AIG-style) would spend its gate budget on real logic instead of negation —
    plausibly the largest remaining win, but it touches the model format, the
    evaluator and the exporter.
-6. **Seed-averaged reporting for everything else.** The default config now has
+7. **Seed-averaged reporting for everything else.** The default config now has
    five seeds (0.1730 ± 0.0066) and runs are deterministic, so the harness is
    established. Re-measure the colour and wide configs the same way (5 seeds,
    paired) rather than as single runs — otherwise they repeat the `gain_end`
@@ -281,7 +291,7 @@ Do not spend time re-running these.
 - The CIFAR binary stores channels **planar** (1024 R, then 1024 G, then 1024 B),
   not interleaved. There is a regression test for this; earlier results were
   invalidated by the bug.
-- Dataset cache format is `XAE4` (magic `XAE4`). `XAE2`/`XAE3` still load.
+- Dataset cache format is `XAE5` when labels are present, else `XAE4`. `XAE2`/`XAE3`/`XAE4` still load (labels default to empty).
 - `web/src/wasm/pkg` is generated: run `scripts/build-wasm.sh` or `npm run build`.
   It must be rebuilt after touching `ColorMode` (an old bundle cannot parse a
   model whose `color_mode` it does not know).

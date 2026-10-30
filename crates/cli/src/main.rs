@@ -5,7 +5,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use xorae::config::TrainConfig;
 use xorae::dataset::Dataset;
-use xorae::{baselines, config, dataset, ga, grad, nand, prior, render, toy};
+use xorae::{
+    baselines, classify, config, dataset, ga, grad, nand, nand_classify, prior, render, toy,
+};
 use xorae_core::color::ColorMode;
 use xorae_core::preprocess::{BinarizeMode, PreprocessOptions};
 use xorae_core::Model;
@@ -153,6 +155,55 @@ enum CliCommand {
         model: PathBuf,
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Train a classifier on the encoder key (or raw pixels) and report accuracy.
+    Classify {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Feature set: `keys` (encoder output) or `pixels` (baseline).
+        #[arg(long, default_value = "keys")]
+        features: String,
+        #[arg(long, default_value_t = 400)]
+        epochs: usize,
+        #[arg(long, default_value_t = 0.1)]
+        lr: f32,
+        #[arg(long, default_value_t = 1e-4)]
+        l2: f32,
+    },
+    /// Train a NAND-gate classifier on encoder keys (128 bits -> classes).
+    ClassifyNand {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Hidden layer widths, comma separated.
+        #[arg(long, default_value = "128,64")]
+        hidden: String,
+        #[arg(long, default_value_t = 200)]
+        epochs: usize,
+        #[arg(long, default_value_t = 128)]
+        batch: usize,
+        #[arg(long, default_value_t = 0.05)]
+        lr: f32,
+        #[arg(long, default_value_t = 8)]
+        candidates: usize,
+        /// Output gates per class (class score is their sum).
+        #[arg(long, default_value_t = 8)]
+        group_size: usize,
+        /// Keep only these labels (comma separated), remapped to 0..k.
+        #[arg(long)]
+        subset_labels: Option<String>,
+        /// Distil a trained softmax classifier (from `classify`) into the circuit.
+        #[arg(long)]
+        distill: Option<PathBuf>,
+        #[arg(long, default_value = "product")]
+        relaxation: String,
     },
     /// Fit a prior over the encoder's 128-bit key space and sample from it.
     Prior {
@@ -575,6 +626,188 @@ fn main() -> Result<()> {
             }
             std::fs::write(&out, json)?;
             println!("exported model to {}", out.display());
+            Ok(())
+        }
+        CliCommand::Classify {
+            model,
+            data,
+            out,
+            features,
+            epochs,
+            lr,
+            l2,
+        } => {
+            let model = load_model(&model)?;
+            let dataset = Dataset::load(&data)?;
+            let opts = classify::ClassifyOptions {
+                features: classify::Features::parse(&features)?,
+                epochs,
+                lr,
+                l2,
+                seed: model.config.seed,
+            };
+            let (classifier, matrix) = classify::train_classifier(&model, &dataset, opts)?;
+            println!(
+                "classify ({}): {} inputs, {} classes | train acc {:.4} | test acc {:.4}",
+                classifier.features,
+                classifier.inputs,
+                classifier.classes,
+                classifier.train_accuracy,
+                classifier.test_accuracy
+            );
+            println!("confusion (rows = true, cols = predicted):");
+            for (label, row) in matrix.iter().enumerate() {
+                let total: usize = row.iter().sum();
+                let acc = if total > 0 {
+                    *row.get(label).unwrap_or(&0) as f32 / total as f32
+                } else {
+                    0.0
+                };
+                println!("  {label}: {:?}  acc {:.3}", row, acc);
+            }
+            classify::save_classifier(&classifier, &out)?;
+            println!("wrote {}", out.display());
+            Ok(())
+        }
+        CliCommand::ClassifyNand {
+            model,
+            data,
+            out,
+            hidden,
+            epochs,
+            batch,
+            lr,
+            candidates,
+            group_size,
+            subset_labels,
+            distill,
+            relaxation,
+        } => {
+            let model = load_model(&model)?;
+            let dataset = Dataset::load(&data)?;
+            if !dataset.has_labels() {
+                bail!(
+                    "dataset {} has no labels; re-run preprocess",
+                    data.display()
+                );
+            }
+            let hidden: Vec<usize> = hidden
+                .split(',')
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().parse::<usize>())
+                .collect::<std::result::Result<_, _>>()
+                .context("parsing --hidden")?;
+            let relaxation = match relaxation.as_str() {
+                "product" => nand::Relaxation::Product,
+                "min" => nand::Relaxation::Min,
+                "lukasiewicz" => nand::Relaxation::Lukasiewicz,
+                other => bail!("unknown relaxation {other}"),
+            };
+            let (train, _, test) = dataset.split_indices(model.config.seed);
+            let keys_for = |idx: &[usize]| -> Result<Vec<Vec<u8>>> {
+                idx.iter()
+                    .map(|&i| {
+                        model
+                            .infer_bits(&dataset.row_bits(i))
+                            .map(|(k, _)| k)
+                            .map_err(anyhow::Error::msg)
+                    })
+                    .collect()
+            };
+            let train_keys = keys_for(&train)?;
+            let test_keys = keys_for(&test)?;
+            let mut train_labels: Vec<u8> = train.iter().map(|&i| dataset.labels[i]).collect();
+            let mut test_labels: Vec<u8> = test.iter().map(|&i| dataset.labels[i]).collect();
+            let mut train_keys = train_keys;
+            let mut test_keys = test_keys;
+            let classes = if let Some(spec) = &subset_labels {
+                let keep: Vec<u8> = spec
+                    .split(',')
+                    .map(|s| s.trim().parse::<u8>())
+                    .collect::<std::result::Result<_, _>>()
+                    .context("parsing --subset-labels")?;
+                let remap = |labels: &mut Vec<u8>, keys: &mut Vec<Vec<u8>>| {
+                    let mut kept_keys = Vec::new();
+                    let mut kept_labels = Vec::new();
+                    for (key, &label) in keys.iter().zip(labels.iter()) {
+                        if let Some(pos) = keep.iter().position(|&k| k == label) {
+                            kept_keys.push(key.clone());
+                            kept_labels.push(pos as u8);
+                        }
+                    }
+                    *keys = kept_keys;
+                    *labels = kept_labels;
+                };
+                remap(&mut train_labels, &mut train_keys);
+                remap(&mut test_labels, &mut test_keys);
+                keep.len()
+            } else {
+                dataset.label_count.max(1)
+            };
+            let cfg = nand_classify::NandClassifyConfig {
+                inputs: model.config.key_bits,
+                classes,
+                hidden,
+                epochs,
+                batch,
+                lr,
+                candidates,
+                group_size,
+                skip_prob: 0.5,
+                binarize_weight: 0.01,
+                gain_start: 1.0,
+                gain_end: 32.0,
+                anneal_fraction: 0.85,
+                relaxation,
+                seed: model.config.seed,
+            };
+            let soft = match &distill {
+                Some(path) => {
+                    let text = std::fs::read_to_string(path)
+                        .with_context(|| format!("reading teacher {}", path.display()))?;
+                    let teacher: classify::Classifier =
+                        serde_json::from_str(&text).context("parsing teacher classifier")?;
+                    let mut rows = Vec::with_capacity(train_keys.len());
+                    for key in &train_keys {
+                        let features: Vec<u8> = match teacher.features.as_str() {
+                            "pixels" => model
+                                .infer_bits(key)
+                                .map(|(_, recon)| recon)
+                                .map_err(anyhow::Error::msg)?,
+                            _ => key.clone(),
+                        };
+                        rows.push(teacher.probabilities(&features));
+                    }
+                    Some(rows)
+                }
+                None => None,
+            };
+            let (circuit, report) = nand_classify::train(
+                &cfg,
+                &train_keys,
+                &train_labels,
+                &test_keys,
+                &test_labels,
+                soft.as_deref(),
+            )?;
+            println!(
+                "nand classifier: train acc {:.4} | test acc {:.4} | gates {} -> {}",
+                report.train_accuracy,
+                report.test_accuracy,
+                report.gates_before,
+                report.gates_after
+            );
+            let hist =
+                nand_classify::prediction_histogram(&circuit, &test_keys, classes, group_size);
+            println!("predicted class distribution on test: {:?}", hist);
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(
+                &out,
+                serde_json::to_string_pretty(&circuit).context("serialising circuit")?,
+            )?;
+            println!("wrote {}", out.display());
             Ok(())
         }
         CliCommand::Prior {
