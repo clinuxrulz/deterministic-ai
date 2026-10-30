@@ -7,7 +7,9 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use xorae_core::bits::BitMatrix;
 use xorae_core::color::{indices_to_bits, nearest_palette_index, ColorMode, Rgb};
-use xorae_core::preprocess::{binarize, quantize2, resize_box, rgb_to_gray, PreprocessOptions};
+use xorae_core::preprocess::{
+    binarize, quantize2, resize_box, rgb_to_gray, BinarizeMode, PreprocessOptions,
+};
 
 pub const CIFAR_RECORD: usize = 1 + 32 * 32 * 3;
 pub const CIFAR_CLASS_CAT: u8 = 3;
@@ -716,6 +718,72 @@ pub fn load_cifar10_rgb2(dir: &Path, class: u8, size: usize) -> Result<Dataset> 
         is_test,
         SplitMode::Hash,
     ))
+}
+
+/// Load MNIST from the raw IDX files in `dir` into a binarized dataset.
+///
+/// `size` resamples the 28x28 digits; `train_limit` keeps only the first N
+/// training images (the test set is always kept whole).
+pub fn load_mnist(
+    dir: &Path,
+    size: usize,
+    threshold: u8,
+    train_limit: Option<usize>,
+) -> Result<Dataset> {
+    let (train_images, rows, cols) = read_idx_images(&dir.join("train-images-idx3-ubyte"))?;
+    let (test_images, _, _) = read_idx_images(&dir.join("t10k-images-idx3-ubyte"))?;
+    let per_image = rows * cols;
+    let n_train = train_images.len() / per_image;
+    let n_test = test_images.len() / per_image;
+    let take = train_limit.unwrap_or(n_train).min(n_train);
+
+    let mut bit_rows = Vec::with_capacity(take + n_test);
+    let mut gray = Vec::with_capacity((take + n_test) * size * size);
+    let mut is_test = Vec::with_capacity(take + n_test);
+    let mut image = vec![0u8; per_image];
+    for (set, count, flag) in [
+        (train_images.as_slice(), take, false),
+        (test_images.as_slice(), n_test, true),
+    ] {
+        for index in 0..count {
+            image.copy_from_slice(&set[index * per_image..(index + 1) * per_image]);
+            let small = resize_box(&image, cols, rows, size);
+            bit_rows.push(binarize(&small, BinarizeMode::Threshold, threshold));
+            gray.extend_from_slice(&small);
+            is_test.push(flag);
+        }
+    }
+
+    Ok(Dataset::from_parts(
+        size,
+        bit_rows,
+        gray,
+        is_test,
+        SplitMode::Hash,
+    ))
+}
+
+/// Read an IDX image file: returns (pixels, rows, cols).
+fn read_idx_images(path: &Path) -> Result<(Vec<u8>, usize, usize)> {
+    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if data.len() < 16 {
+        bail!("{} is too short to be an IDX file", path.display());
+    }
+    let be =
+        |o: usize| u32::from_be_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as usize;
+    if be(0) != 2051 {
+        bail!("{}: unexpected IDX magic {}", path.display(), be(0));
+    }
+    let (n, rows, cols) = (be(4), be(8), be(12));
+    let expected = 16 + n * rows * cols;
+    if data.len() != expected {
+        bail!(
+            "{}: length {} does not match {n} images of {rows}x{cols}",
+            path.display(),
+            data.len()
+        );
+    }
+    Ok((data[16..].to_vec(), rows, cols))
 }
 
 fn cifar_files(dir: &Path) -> Vec<PathBuf> {

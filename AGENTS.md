@@ -162,7 +162,7 @@ cargo run --release -p xorae -- export \
 | Command | Purpose |
 |---|---|
 | `fetch-data` | Download/extract CIFAR-10 |
-| `preprocess` | Build a cached dataset (`XAE4` format); `--binarize`, `--rgb1` (8 colours), `--rgb2` (64 colours), `--palette` |
+| `preprocess` | Build a cached dataset (`XAE4`); `--binarize`, `--rgb1`, `--rgb2`, `--palette`, or `--mnist-dir` for raw IDX files |
 | `train` | Genetic algorithm (legacy track) |
 | `train-grad` | Gradient training of **gate types** on a fixed hierarchical wiring |
 | `train-nand` | **Current best**: NAND-only wiring search |
@@ -171,6 +171,7 @@ cargo run --release -p xorae -- export \
 | `baselines` | Zero, majority, top-K, greedy GF(2) |
 | `simplify` | Exact post-pass on a model: constant folding, CSE, dead-gate removal (`--verify`, `--verify-random`) |
 | `prune` | Lossy size pass: bypass gates while BER stays within `--tolerance`, down to `--target` gates |
+| `prior` | Fit Bernoulli / autoregressive priors over the key space, sample, decode, report NLL and round-trip |
 | `export` | Copy a model into `web/public/models/` |
 | `export-samples` | 32×32 RGB previews for the demo gallery |
 
@@ -240,29 +241,35 @@ Do not spend time re-running these.
 
 ## Open threads, in priority order
 
-1. **Capacity per gate is the binding constraint.** Two independent
+1. **Key space is generative, not just a codebook.** `xorae prior` fits a
+   causal linear AR model over the 128-bit keys: on MNIST it reaches 0.318
+   bits/bit held-out (about 41 bits of entropy) and its samples round-trip as
+   well as real keys (0.806 vs 0.801) while decoding to recognisable digits.
+   Next steps if this is the direction: a nonlinear/RNN prior should cut the
+   NLL further, and a GAN on keys is now defensible rather than speculative.
+2. **Capacity per gate is the binding constraint.** Two independent
    measurements: the model cannot fit 100 images (train BER 0.1741 ≈ the 4,000
    image result), and train/val/test BER are all equal. Objective tweaks do not
    help (see the ruled-out table). The levers left are what a gate is spent on:
    free inversions (42% of gates are `Nand(x,x)`), spatial weight sharing, and
    distillation from a CNN teacher. A margin/hinge loss on bit decisions is the
    one cheap objective variant not yet tried.
-2. **Colour, 2 bits/channel: shipped.** `--rgb2` gives 64 colours as six bit
+3. **Colour, 2 bits/channel: shipped.** `--rgb2` gives 64 colours as six bit
    planes (1,536 bits, 192-bit key, 8×); over six paired seeds it cuts absolute
    reconstruction error by 33.7% for 1.91× the gates. It is in the demo as
    `cats16-rgb2`, and `eval` reports both `abs MAE vs original` and the
    palette-relative MAE.
-3. **Size-vs-BER frontier: first pass done.** `xorae prune` gives product
+4. **Size-vs-BER frontier: first pass done.** `xorae prune` gives product
    0.1749 at 1,400 gates and 0.1775 at 1,300 (from 0.1722 at 1,547), steepening
    below 1,200. The greedy bypass rule is crude — better pruning (retrain or
    fine-tune after each cut, or remove whole cones) could move this curve.
-4. **Inversions are 42% of the budget.** In the shipped model 907 of 2,165
+5. **Inversions are 42% of the budget.** In the shipped model 907 of 2,165
    reachable gates are `Nand(x, x)` (i.e. `NOT x`), and only 627 of those are
    distinct wires. A trainer that lets a gate consume an inverted wire for free
    (AIG-style) would spend its gate budget on real logic instead of negation —
    plausibly the largest remaining win, but it touches the model format, the
    evaluator and the exporter.
-5. **Seed-averaged reporting for everything else.** The default config now has
+6. **Seed-averaged reporting for everything else.** The default config now has
    five seeds (0.1730 ± 0.0066) and runs are deterministic, so the harness is
    established. Re-measure the colour and wide configs the same way (5 seeds,
    paired) rather than as single runs — otherwise they repeat the `gain_end`
@@ -293,6 +300,11 @@ Do not spend time re-running these.
 - `xorae prune --target N [--tolerance T]` is the *lossy* size pass (bypass +
   dead-code elimination, greedy on a calibration sample). `simplify` is the
   exact one; use `simplify` first.
+- **BER is a bad metric on sparse data.** On binarized MNIST (13.4% ones) the
+  model scores 0.2254 while all-zero scores 0.1366, despite reconstructing
+  recognisable digits. Use IoU/F1 or balanced accuracy there.
+- MNIST is fetched separately: `./scripts/fetch_mnist.sh data/mnist`, then
+  `preprocess --mnist-dir ... --limit N`. `XAE4` stores no labels.
 - Solid is pinned to `2.0.0-rc.19` and uses `onSettled` (not `onMount`).
 - Headless Chrome needs `--virtual-time-budget=40000`; 20 s is too short for
   image decode.

@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use xorae::config::TrainConfig;
 use xorae::dataset::Dataset;
-use xorae::{baselines, config, dataset, ga, grad, nand, render, toy};
+use xorae::{baselines, config, dataset, ga, grad, nand, prior, render, toy};
 use xorae_core::color::ColorMode;
 use xorae_core::preprocess::{BinarizeMode, PreprocessOptions};
 use xorae_core::Model;
@@ -31,7 +31,7 @@ enum CliCommand {
     /// Convert CIFAR-10 cat images into a cached xorae dataset.
     Preprocess {
         #[arg(long)]
-        cifar_dir: PathBuf,
+        cifar_dir: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
         #[arg(long, default_value_t = 16)]
@@ -51,6 +51,12 @@ enum CliCommand {
         /// Build a 3-channel 2-bit RGB dataset (64 colors).
         #[arg(long)]
         rgb2: bool,
+        /// Build from raw MNIST IDX files in this directory instead of CIFAR.
+        #[arg(long)]
+        mnist_dir: Option<PathBuf>,
+        /// Keep only the first N training images (MNIST only).
+        #[arg(long)]
+        limit: Option<usize>,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -148,6 +154,23 @@ enum CliCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Fit a prior over the encoder's 128-bit key space and sample from it.
+    Prior {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 32)]
+        samples: usize,
+        #[arg(long, default_value_t = 150)]
+        epochs: usize,
+        #[arg(long, default_value_t = 0.05)]
+        lr: f32,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+    },
     /// Lossy gate removal: bypass gates while BER stays within a tolerance.
     Prune {
         #[arg(long)]
@@ -232,8 +255,28 @@ fn main() -> Result<()> {
             palette,
             rgb1,
             rgb2,
+            mnist_dir,
+            limit,
             seed,
         } => {
+            if let Some(mnist_dir) = mnist_dir {
+                let dataset = dataset::load_mnist(&mnist_dir, size, threshold, limit)?;
+                dataset.save(&out)?;
+                let (train, val, test) = dataset.split_indices(seed);
+                println!(
+                    "wrote {} ({} images, {}x{}, binarized MNIST; {} train / {} val / {} test)",
+                    out.display(),
+                    dataset.n,
+                    size,
+                    size,
+                    train.len(),
+                    val.len(),
+                    test.len()
+                );
+                return Ok(());
+            }
+            let cifar_dir =
+                cifar_dir.context("--cifar-dir is required unless --mnist-dir is used")?;
             if let Some(palette_size) = palette {
                 let dataset =
                     dataset::load_cifar10_palette(&cifar_dir, class, size, palette_size, seed)?;
@@ -532,6 +575,46 @@ fn main() -> Result<()> {
             }
             std::fs::write(&out, json)?;
             println!("exported model to {}", out.display());
+            Ok(())
+        }
+        CliCommand::Prior {
+            model,
+            data,
+            out,
+            samples,
+            epochs,
+            lr,
+            seed,
+        } => {
+            let model = load_model(&model)?;
+            let dataset = Dataset::load(&data)?;
+            let reports = prior::run_prior(
+                &model,
+                &dataset,
+                &out,
+                prior::PriorOptions {
+                    samples,
+                    epochs,
+                    lr,
+                    seed,
+                },
+            )?;
+            println!(
+                "prior: {:>16} {:>9} {:>9} {:>9} {:>9}",
+                "", "marg MAE", "diversity", "roundtrip", "NLL bits"
+            );
+            for (name, r) in reports {
+                let nll = if r.nll_bits.is_nan() {
+                    "   n/a".to_string()
+                } else {
+                    format!("{:6.3}", r.nll_bits)
+                };
+                println!(
+                    "prior: {:>16} {:>9.4} {:>9.4} {:>9.4} {:>9}",
+                    name, r.marginal_mae, r.diversity, r.roundtrip, nll
+                );
+            }
+            println!("images written to {}", out.display());
             Ok(())
         }
         CliCommand::Prune {

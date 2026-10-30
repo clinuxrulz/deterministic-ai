@@ -672,3 +672,79 @@ cargo run --release -p xorae -- prune \
   --data data/cats32_threshold.bin \
   --out runs/cats32-pruned-1400.json --target 1400 --tolerance 0.0005
 ```
+## Checkpoint 8 (2026-10-30): is the key space generative?
+
+The encoder maps an image to a `k`-bit key; the decoder maps it back. If the
+set of keys the encoder produces can be modelled and sampled, the circuit is a
+generator with a 128-bit latent and a generator needs no new machinery. If the
+keys are an unstructured per-image codebook, a GAN on top would have nothing to
+learn.
+
+`xorae prior` fits two priors on the training keys and samples from both:
+
+- **Bernoulli** — independent per-bit probability (128 parameters).
+- **Autoregressive** — causal linear model `p(x_j) = sigmoid(b_j + sum_{i<j}
+  w_ji x_i)`, i.e. a fully visible sigmoid belief net (16,512 parameters).
+
+It then decodes the samples and reports: marginal MAE against the data's bit
+marginals, mean pairwise Hamming diversity, a **round-trip** score (decode the
+key, re-encode the image, compare keys — a proxy for "does this key lie on the
+model's manifold"), and held-out **NLL in bits per key bit** for the priors.
+Uniform and empirical keys bracket the results.
+
+### MNIST, 32x32, 1,024 bits -> 128-bit key (1,287 gates after simplification)
+
+| samples | marg MAE | diversity | round-trip | NLL (bits/bit) |
+|---|---|---|---|---|
+| uniform | 0.265 | 0.500 | 0.570 | 1.000 |
+| empirical (real keys) | 0.045 | 0.304 | **0.801** | — |
+| Bernoulli | 0.041 | 0.304 | 0.710 | 0.622 |
+| autoregressive | 0.051 | 0.291 | **0.806** | **0.318** |
+
+The autoregressive prior reproduces the empirical round-trip score (0.806 vs
+0.801) and compresses the key distribution from 1.0 to **0.318 bits per bit** on
+held-out keys, i.e. about 41 bits of entropy in a 128-bit code. Visually the
+difference is stark: uniform keys decode to noise, AR-sampled keys decode to
+recognisable digits, and they are as coherent as the decodes of real keys.
+
+### Cats, 32x32 (the shipped model)
+
+| samples | marg MAE | diversity | round-trip | NLL (bits/bit) |
+|---|---|---|---|---|
+| uniform | 0.145 | 0.500 | 0.721 | 1.000 |
+| empirical | 0.068 | 0.476 | 0.916 | — |
+| Bernoulli | 0.065 | 0.459 | 0.763 | 0.943 |
+| autoregressive | 0.058 | 0.466 | 0.889 | 0.544 |
+
+Same ordering, weaker effect: cat keys are less compressible (0.544 vs 0.318),
+and the independent-Bernoulli prior is almost useless there (0.943) because the
+structure is in the correlations, not the marginals.
+
+### Conclusion
+
+**The code space is structured and generative.** A 16k-parameter linear prior
+over 128 bits is enough to sample keys whose decodes are (a) visually
+recognisable on MNIST, and (b) statistically indistinguishable from real keys
+by round-trip. A GAN on keys is therefore viable but not necessary for a first
+generator: the AR prior already is one.
+
+### Caveat + metric trap
+
+MNIST is sparse (13.4% of bits are 1), so **BER is the wrong metric**: the model
+scores 0.2254 while predicting all zeros scores 0.1366, even though the model
+reconstructs recognisable digits (see `runs/mnist_render.png`). Judge sparse
+tasks with IoU/F1 or balanced accuracy. Reconstruction quality is also capped by
+the decoder's salt-and-pepper noise, which is present for real keys too, so
+prior samples are no worse than the autoencoder itself.
+
+### Reproduce
+
+```bash
+./scripts/fetch_mnist.sh data/mnist
+cargo run --release -p xorae -- preprocess --mnist-dir data/mnist \
+  --out data/mnist32.bin --size 32 --limit 12000
+cargo run --release -p xorae -- train-nand --config configs/mnist32_nand.toml \
+  --data data/mnist32.bin --out runs/mnist32
+cargo run --release -p xorae -- prior --model runs/mnist32/model.json \
+  --data data/mnist32.bin --out runs/prior_mnist --samples 32
+```

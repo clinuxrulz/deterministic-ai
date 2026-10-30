@@ -9,5 +9,6 @@ pub mod dataset;
 pub mod ga;
 pub mod grad;
 pub mod nand;
+pub mod prior;
 pub mod render;
 pub mod toy;

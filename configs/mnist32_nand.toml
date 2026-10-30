@@ -1,0 +1,36 @@
+# NAND-only autoencoder on binarized MNIST resampled to 32x32.
+#
+# Same shape and budget as the CIFAR cats model (1,024 bits -> 128-bit key,
+# 8x compression, 2,688 gates), but a much easier reconstruction target: this
+# is the control for the key-prior experiment, where we need a model whose
+# reconstructions are recognisable.
+image_size = 32
+channels = 1
+key_bits = 128
+hidden = [512, 256]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+# See configs/cats32_nand.toml: product beats Gödel once circuits are compared
+# at equal size, and MNIST is used here for size-controlled comparisons.
+relaxation = "product"
+
+polish_sweeps = 2
+polish_samples = 512
+
+seed = 42
+log_every = 10
+val_every = 25
