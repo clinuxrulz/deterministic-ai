@@ -1,0 +1,52 @@
+{
+  "models": [
+    {
+      "id": "cats32-nand",
+      "name": "CIFAR cats 32×32 · NAND-only (best)",
+      "path": "models/cats32-nand.json",
+      "description": "Best grayscale: 1,547 NAND gates after exact simplification (2,688 trained), 128-bit key, 8x compression, test BER 17.27%."
+    },
+    {
+      "id": "cats16-rgb2",
+      "name": "CIFAR cats 16×16 · RGB 2-bit/channel (64 colours)",
+      "path": "models/cats16-rgb2.json",
+      "description": "2-bit colour: 6 bit planes, 1,536 bits, 192-bit key, 8x compression. 2,345 NAND gates after exact simplification; abs MAE 23.61% vs the original image."
+    },
+    {
+      "id": "cats16-rgb1",
+      "name": "CIFAR cats 16×16 · RGB 1-bit/channel",
+      "path": "models/cats16-rgb1.json",
+      "description": "Color experiment: 8-colour RGB posterization, 128-bit key, 577 active gates; abs MAE 33.41% vs the original image."
+    },
+    {
+      "id": "cats16-xor-and-threshold",
+      "name": "CIFAR cats 16×16 · XOR + AND (threshold)",
+      "path": "models/cats16-threshold.json",
+      "description": "Grayscale control: threshold binarization, 32-bit key, test BER 22.85%."
+    },
+    {
+      "id": "cats16-xor-and",
+      "name": "CIFAR cats 16×16 · XOR + AND (dither)",
+      "path": "models/cats16-xor-and.json",
+      "description": "Dither control: test BER 44.18%."
+    },
+    {
+      "id": "cats16-xor",
+      "name": "CIFAR cats 16×16 · strict XOR",
+      "path": "models/cats16-xor.json",
+      "description": "Linear-code control: test BER 48.11%."
+    },
+    {
+      "id": "toy",
+      "name": "Toy 8×8 · strict XOR",
+      "path": "models/toy.json",
+      "description": "16 patterns from a 4-dimensional GF(2) subspace; exact reconstruction."
+    },
+    {
+      "id": "mnist32",
+      "name": "MNIST digits 32×32 · NAND-only",
+      "path": "models/mnist32.json",
+      "description": "Binarized MNIST, 128-bit key, 1,287 gates after exact simplification. Source of the keys used by the draw-a-digit tab."
+    }
+  ]
+}
