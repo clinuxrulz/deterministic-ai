@@ -572,6 +572,101 @@ function toModelBits(source: HTMLCanvasElement): Uint8Array | null {
   return bits;
 }
 
+/**
+ * Render recorded stroke points at a fixed MNIST-like width.
+ *
+ * Drawing a large digit on the canvas and then scaling its *bounding box* to
+ * 20 px shrinks the strokes with it, and thin strokes are lost when the
+ * bilinear downscale pushes them below the 128 threshold. Re-rendering the
+ * path at a constant width makes the result independent of how large the user
+ * drew, which is what MNIST looks like.
+ */
+function strokesToBits(
+  strokes: { x: number; y: number }[][],
+  width = 2.75,
+): Uint8Array | null {
+  const points = strokes.flat();
+  if (points.length === 0) return null;
+
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+  for (const p of points) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  const span = Math.max(maxX - minX, maxY - minY);
+  if (span <= 1e-4) return null; // a single tap, not a digit
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  // Map the long side of the drawing onto a 20 px box inside the 28 px grid.
+  const scale = 20 / span;
+
+  const draw = (dx: number, dy: number): HTMLCanvasElement => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 28;
+    canvas.height = 28;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("no 2d context");
+    context.fillStyle = "#000000";
+    context.fillRect(0, 0, 28, 28);
+    context.strokeStyle = "#ffffff";
+    context.fillStyle = "#ffffff";
+    context.lineWidth = width;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    for (const stroke of strokes) {
+      if (stroke.length === 1) {
+        const x = 14 + (stroke[0].x - cx) * scale + dx;
+        const y = 14 + (stroke[0].y - cy) * scale + dy;
+        context.beginPath();
+        context.arc(x, y, width / 2, 0, Math.PI * 2);
+        context.fill();
+        continue;
+      }
+      context.beginPath();
+      stroke.forEach((p, i) => {
+        const x = 14 + (p.x - cx) * scale + dx;
+        const y = 14 + (p.y - cy) * scale + dy;
+        if (i === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
+      });
+      context.stroke();
+    }
+    return canvas;
+  };
+
+  // Centre by centre of mass, as MNIST preprocessing does.
+  const first = draw(0, 0);
+  const data = first.getContext("2d")!.getImageData(0, 0, 28, 28).data;
+  let sx = 0;
+  let sy = 0;
+  let count = 0;
+  for (let y = 0; y < 28; y += 1) {
+    for (let x = 0; x < 28; x += 1) {
+      if (data[(y * 28 + x) * 4] >= 128) {
+        sx += x;
+        sy += y;
+        count += 1;
+      }
+    }
+  }
+  if (count === 0) return null;
+  const centred = draw(
+    Math.round(13.5 - sx / count),
+    Math.round(13.5 - sy / count),
+  );
+  const src = centred.getContext("2d")!.getImageData(0, 0, 28, 28).data;
+  const bits = new Uint8Array(28 * 28);
+  for (let i = 0; i < bits.length; i += 1) {
+    bits[i] = src[i * 4] >= 128 ? 1 : 0;
+  }
+  return bits;
+}
+
 function DigitLab() {
   const params = new URLSearchParams(window.location.search);
   let drawRef: HTMLCanvasElement | undefined;
@@ -581,6 +676,10 @@ function DigitLab() {
   let sample: DigitSample | null = null;
   let drawing = false;
   let lastPoint: { x: number; y: number } | null = null;
+  // Live strokes are re-rendered at a fixed width; the built-in sample is a
+  // bitmap and goes through the raster path instead.
+  let strokes: { x: number; y: number }[][] = [];
+  let mode: "strokes" | "image" = "strokes";
 
   const [status, setStatus] = createSignal("loading digit model…");
   const [prediction, setPrediction] = createSignal<number | null>(null);
@@ -595,6 +694,8 @@ function DigitLab() {
     if (!context) return;
     context.fillStyle = DIGIT_BG;
     context.fillRect(0, 0, canvas.width, canvas.height);
+    strokes = [];
+    mode = "strokes";
     setPrediction(null);
     setVotes([]);
     setRunnerUp(null);
@@ -648,7 +749,7 @@ function DigitLab() {
   const classify = () => {
     const canvas = drawRef;
     if (!canvas || !meta) return;
-    const bits = toModelBits(canvas);
+    const bits = mode === "strokes" ? strokesToBits(strokes) : toModelBits(canvas);
     if (!bits) {
       setPrediction(null);
       setVotes([]);
@@ -688,6 +789,7 @@ function DigitLab() {
 
   const selfTest = () => {
     if (!sample) return;
+    mode = "image";
     const bits = new Uint8Array(sample.size * sample.size);
     for (let i = 0; i < bits.length; i += 1) bits[i] = sample.bits[i] === "1" ? 1 : 0;
     paintBits(bits, sample.size);
@@ -709,7 +811,11 @@ function DigitLab() {
     event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
     drawing = true;
+    mode = "strokes";
     lastPoint = pointOf(event);
+    strokes.push([
+      { x: lastPoint.x / canvas.width, y: lastPoint.y / canvas.height },
+    ]);
     const context = canvas.getContext("2d");
     if (!context) return;
     context.fillStyle = DIGIT_INK;
@@ -726,6 +832,10 @@ function DigitLab() {
     const context = canvas.getContext("2d");
     if (!context) return;
     const point = pointOf(event);
+    strokes[strokes.length - 1].push({
+      x: point.x / canvas.width,
+      y: point.y / canvas.height,
+    });
     context.strokeStyle = DIGIT_INK;
     context.lineWidth = 20;
     context.lineCap = "round";
@@ -764,6 +874,30 @@ function DigitLab() {
         setStatus(
           `ready · ${metaJson.gates} NAND gates, no weights · ${(metaJson.test_accuracy * 100).toFixed(1)}% on MNIST test`,
         );
+        // Headless check for the stroke path: ?strokes=<scale> draws a
+        // synthetic 7 at that fraction of the canvas and classifies it. The
+        // result must not depend on the scale, since width is normalised.
+        const strokeScale = Number(params.get("strokes"));
+        if (Number.isFinite(strokeScale) && strokeScale > 0) {
+          const base = [
+            [
+              { x: 0.15, y: 0.18 },
+              { x: 0.85, y: 0.18 },
+            ],
+            [
+              { x: 0.74, y: 0.18 },
+              { x: 0.34, y: 0.88 },
+            ],
+          ];
+          const shrink = (p: { x: number; y: number }) => ({
+            x: 0.5 + (p.x - 0.5) * strokeScale,
+            y: 0.5 + (p.y - 0.5) * strokeScale,
+          });
+          strokes = base.map((stroke) => stroke.map(shrink));
+          mode = "strokes";
+          classify();
+          setStatus(`strokes: synthetic 7 at scale ${strokeScale}`);
+        }
         if (params.get("selftest") === "1") {
           selfTest();
           setStatus(`self-test: drew a "${sampleJson.label}" and classified it`);
@@ -833,7 +967,9 @@ function DigitLab() {
           </For>
         </div>
         <canvas ref={previewRef} class="digit-preview" width={128} height={128} />
-        <p class="hint">what the circuit sees · 28×28 thresholded pixels</p>
+        <p class="hint">
+          what the circuit sees · 28×28 thresholded pixels · stroke width is normalised
+        </p>
       </div>
     </section>
   );
