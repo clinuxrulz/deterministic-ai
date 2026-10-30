@@ -775,6 +775,179 @@ fn build_circuit(net: &Net, alpha: &[f32], beta: &[f32]) -> (Circuit, Circuit) {
     (encoder, decoder)
 }
 
+/// Options for lossy gate removal.
+#[derive(Clone, Copy, Debug)]
+pub struct PruneOptions {
+    /// Stop once the circuit has at most this many gates.
+    pub target: Option<usize>,
+    /// Largest BER increase (absolute) accepted for a single removal.
+    pub tolerance: f32,
+    /// Samples used to score candidate removals.
+    pub calibrate: usize,
+    /// Hard cap on how many gates may be removed.
+    pub max_removals: usize,
+}
+
+impl Default for PruneOptions {
+    fn default() -> Self {
+        Self {
+            target: None,
+            tolerance: 0.0,
+            calibrate: 512,
+            max_removals: 4096,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PruneStats {
+    pub gates_before: usize,
+    pub gates_after: usize,
+    pub removed: usize,
+    pub ber_before: f32,
+    pub ber_after: f32,
+}
+
+/// Remove gates by bypassing them to one of their inputs.
+///
+/// Rewriting `wire` to `gate.a` (or `.b`) and re-running dead-code elimination
+/// is a valid transformation for any circuit; whether it is *harmless* is
+/// measured on a calibration sample. Candidate order is by fanout, so cheap
+/// gates are tried first, and every acceptance restarts the scan because gate
+/// indices shift when dead gates are pruned.
+pub fn prune_gates(
+    encoder: &Circuit,
+    decoder: &Circuit,
+    dataset: &Dataset,
+    seed: u64,
+    opts: PruneOptions,
+) -> (Circuit, Circuit, PruneStats) {
+    let (train, _, _) = dataset.split_indices(seed);
+    let n = opts.calibrate.min(train.len()).max(1);
+    let idxs: Vec<usize> = (0..n).map(|i| train[i * train.len() / n]).collect();
+    let batch = BitBatch::from_matrix(&dataset.bits, &idxs);
+    let mut eval = Evaluator::new(batch);
+
+    let mut enc = encoder.clone();
+    let mut dec = decoder.clone();
+    let mut stats = PruneStats {
+        gates_before: enc.gates.len() + dec.gates.len(),
+        ..Default::default()
+    };
+    let mut base = eval.ber(&enc, &dec);
+    stats.ber_before = base;
+
+    let mut removed = 0usize;
+    while removed < opts.max_removals {
+        let total = enc.gates.len() + dec.gates.len();
+        if let Some(target) = opts.target {
+            if total <= target {
+                break;
+            }
+        }
+        match find_removal(&enc, &dec, &mut eval, base, opts.tolerance) {
+            Some((new_enc, new_dec, ber)) => {
+                enc = new_enc;
+                dec = new_dec;
+                base = ber;
+                removed += 1;
+            }
+            None => break,
+        }
+    }
+
+    stats.gates_after = enc.gates.len() + dec.gates.len();
+    stats.removed = removed;
+    stats.ber_after = base;
+    (enc, dec, stats)
+}
+
+/// One scan for an acceptable single-gate removal. Returns the first hit.
+fn find_removal(
+    enc: &Circuit,
+    dec: &Circuit,
+    eval: &mut Evaluator,
+    base: f32,
+    tolerance: f32,
+) -> Option<(Circuit, Circuit, f32)> {
+    for (which, circuit) in [(0usize, enc), (1usize, dec)] {
+        let fanout = fanout_counts(circuit);
+        let mut order: Vec<usize> = (0..circuit.gates.len()).collect();
+        order.sort_by_key(|&g| fanout[g]);
+
+        for &g in &order {
+            if circuit.gates[g].a == circuit.gates[g].b {
+                // Already an inverter; bypassing it to its input is a real change.
+            }
+            for use_a in [true, false] {
+                let candidate = bypass(circuit, g, use_a);
+                let (e, d) = if which == 0 {
+                    (&candidate, dec)
+                } else {
+                    (enc, &candidate)
+                };
+                let ber = eval.ber(e, d);
+                if ber <= base + tolerance {
+                    return Some(match which {
+                        0 => (candidate, dec.clone(), ber),
+                        _ => (enc.clone(), candidate, ber),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Number of times each gate's output is read (including by outputs).
+fn fanout_counts(circuit: &Circuit) -> Vec<u32> {
+    let gs = circuit.gate_start();
+    let mut fan = vec![0u32; circuit.gates.len()];
+    let mut bump = |w: u16| {
+        if (w as usize) >= gs {
+            let i = w as usize - gs;
+            if i < fan.len() {
+                fan[i] += 1;
+            }
+        }
+    };
+    for g in &circuit.gates {
+        bump(g.a);
+        if !g.op.is_unary() {
+            bump(g.b);
+        }
+    }
+    for &o in &circuit.outputs {
+        bump(o);
+    }
+    fan
+}
+
+/// Rewire every read of gate `g` to one of its inputs, then drop dead gates.
+fn bypass(circuit: &Circuit, g: usize, use_a: bool) -> Circuit {
+    let wire = (circuit.gate_start() + g) as u16;
+    let repl = if use_a {
+        circuit.gates[g].a
+    } else {
+        circuit.gates[g].b
+    };
+    let mut c = circuit.clone();
+    for gate in &mut c.gates {
+        if gate.a == wire {
+            gate.a = repl;
+        }
+        if gate.b == wire {
+            gate.b = repl;
+        }
+    }
+    for out in &mut c.outputs {
+        if *out == wire {
+            *out = repl;
+        }
+    }
+    c.prune_dead()
+}
+
 /// Relaxed NAND on soft activations.
 fn nand_relax(relaxation: Relaxation, u: f32, v: f32) -> f32 {
     match relaxation {
@@ -1480,5 +1653,83 @@ mod tests {
     fn min_relaxation_tie_sends_gradient_to_one_side() {
         let (gu, gv) = nand_relax_grad(Relaxation::Min, 0.5, 0.5);
         assert_eq!(gu + gv, -1.0, "tie must not double-count the gradient");
+    }
+
+    fn toy_dataset(n: usize, size: usize) -> Dataset {
+        let pixels = size * size;
+        let mut rows = Vec::with_capacity(n);
+        let mut gray = Vec::with_capacity(n * pixels);
+        let mut is_test = Vec::with_capacity(n);
+        let mut state = 0x1234_5678u64;
+        for i in 0..n {
+            let mut row = Vec::with_capacity(pixels);
+            for _ in 0..pixels {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let bit = ((state >> 33) & 1) as u8;
+                row.push(bit);
+                gray.push(bit * 255);
+            }
+            rows.push(row);
+            is_test.push(i % 5 == 0);
+        }
+        Dataset::from_parts(size, rows, gray, is_test, crate::dataset::SplitMode::Hash)
+    }
+
+    #[test]
+    fn prune_never_worsens_ber_beyond_tolerance() {
+        let dataset = toy_dataset(32, 8);
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let cfg = tiny_cfg();
+        let net = Net::build(&cfg, &mut rng).unwrap();
+        let mut trainer = Trainer::new(net, &cfg, &mut rng);
+        trainer.refresh_probs();
+        let (enc, dec) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
+
+        let (pe, pd, stats) = prune_gates(
+            &enc,
+            &dec,
+            &dataset,
+            7,
+            PruneOptions {
+                target: Some(8),
+                tolerance: 0.0,
+                calibrate: 32,
+                max_removals: 10_000,
+            },
+        );
+        pe.validate().unwrap();
+        pd.validate().unwrap();
+        assert!(stats.gates_after <= stats.gates_before);
+        assert!(stats.removed > 0, "nothing was pruned: {stats:?}");
+        assert!(
+            stats.ber_after <= stats.ber_before + 1e-6,
+            "BER increased: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn prune_stops_at_the_target() {
+        let dataset = toy_dataset(16, 8);
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let cfg = tiny_cfg();
+        let net = Net::build(&cfg, &mut rng).unwrap();
+        let mut trainer = Trainer::new(net, &cfg, &mut rng);
+        trainer.refresh_probs();
+        let (enc, dec) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
+        let (pe, pd, stats) = prune_gates(
+            &enc,
+            &dec,
+            &dataset,
+            3,
+            PruneOptions {
+                target: Some(4),
+                tolerance: 0.2,
+                calibrate: 16,
+                max_removals: 10_000,
+            },
+        );
+        assert!(stats.gates_after >= 4 || stats.removed == 0);
+        pe.validate().unwrap();
+        pd.validate().unwrap();
     }
 }

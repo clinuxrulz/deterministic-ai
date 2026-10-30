@@ -38,13 +38,21 @@ The demo also ships **`cats16-rgb2`** (2-bit colour, 64 colours, 192-bit key,
 console errors. Loading it requires the rebuilt wasm bundle — an older one
 cannot parse `ColorMode::Rgb2`.
 
-**Best configuration differs from the shipped artifact.** With the Gödel
-relaxation (`relaxation = "min"`, now the default in `configs/cats32_nand.toml`)
-the same trainer reaches test BER **0.1641 ± 0.0093** over seeds 0-9 versus
-0.1730 ± 0.0060 for the product t-norm — paired −0.0089, 95% CI [−0.0159,
-−0.0019]. It costs ~17% more gates (1,843 vs 1,572) because it keeps 77% of
-gates as real two-input logic instead of 65%. The committed demo artifact is
-still the product model; see `docs/experiment.md`, Checkpoint 6.
+**Two relaxations, two different wins.** Product (`relaxation = "product"`,
+the default) is better *per gate*; Gödel (`min`) is better at equal *training*
+budget:
+
+| | product | min (Gödel) |
+|---|---|---|
+| As trained (test BER) | 0.1730 ± 0.0060 | **0.1641 ± 0.0093** |
+| Gates after simplification | 1,572 ± 52 | 1,843 ± 44 |
+| Real two-input logic | 65.3% | **77.3%** |
+| Pruned to 1,400 gates | **0.1811 ± 0.0057** | 0.2154 ± 0.0167 |
+| Pruned to 1,300 gates | **0.1882 ± 0.0157** | 0.2401 ± 0.0151 |
+
+Gödel's extra gates are load-bearing, so it degrades much faster when
+compressed. Since this project optimises tiny circuits, product stays the
+default; see `docs/experiment.md` Checkpoints 6 and 7.
 
 **Two gate counts, never mix them.** 1,547 is the number of literal NAND gates.
 986 is the AND-node count in an AIG view where inverted wires are free; in CMOS
@@ -162,6 +170,7 @@ cargo run --release -p xorae -- export \
 | `render` | PNG of original / binarized / reconstruction |
 | `baselines` | Zero, majority, top-K, greedy GF(2) |
 | `simplify` | Exact post-pass on a model: constant folding, CSE, dead-gate removal (`--verify`, `--verify-random`) |
+| `prune` | Lossy size pass: bypass gates while BER stays within `--tolerance`, down to `--target` gates |
 | `export` | Copy a model into `web/public/models/` |
 | `export-samples` | 32×32 RGB previews for the demo gallery |
 
@@ -182,9 +191,10 @@ cargo run --release -p xorae -- export \
 
 - Fixed hierarchical wiring: `32×32 → 16×32 → 16×16 → 8×16` (128-bit key) and a
   mirrored decoder.
-- The gate is relaxed as `1 - min(u, v)` (Gödel t-norm). Product (`1 - u*v`)
-  and Łukasiewicz are available via `--relaxation`; product is measurably worse
-  and Łukasiewicz fails outright.
+- The gate is relaxed as `1 - u*v` (product t-norm) by default, with `min`
+  (Gödel) and `lukasiewicz` selectable via `--relaxation`. Gödel gives better
+  BER at equal training budget but a worse size-accuracy trade; Łukasiewicz
+  fails outright.
 - Each gate gets `n_local + n_global` **candidate wires** (default 9 local +
   3 long-range across layers).
 - Two softmax distributions per gate (`alpha`, `beta`) select its two NAND
@@ -226,7 +236,7 @@ Do not spend time re-running these.
 | Hard wiring + straight-through (`--wire-ste`) | 0.2164 at seed 42 vs 0.1722. Trains the exported argmax circuit directly; plateaus by epoch ~75 |
 | More data / augmentation as an accuracy fix | The model cannot fit 100 images (train BER 0.1741 after ~12,000 updates), so there is no overfitting gap to close |
 | Łukasiewicz gate relaxation | 0.2117 at seed 42 vs 0.1722. Nilpotent: zero gradient whenever `u + v <= 1` |
-| Product t-norm as the default | Gödel `min` is better: paired −0.0089 over 10 seeds, and makes `NAND(x,x)` an exact NOT instead of `1 - x²` |
+| Gödel `min` as the default | Better at equal training budget (−0.0089 over 10 seeds) but much worse at equal size: pruned to 1,400 gates it scores 0.2154 vs 0.1811 for product (0/5 seeds win). Its extra gates are load-bearing |
 
 ## Open threads, in priority order
 
@@ -242,9 +252,10 @@ Do not spend time re-running these.
    reconstruction error by 33.7% for 1.91× the gates. It is in the demo as
    `cats16-rgb2`, and `eval` reports both `abs MAE vs original` and the
    palette-relative MAE.
-3. **Gate removal for size.** Exact simplification (below) is done; the
-   lossy frontier is not. Removing *active* gates with a tolerance gives a
-   size-vs-BER curve, starting from 1,547 rather than 2,165. Nothing tried yet.
+3. **Size-vs-BER frontier: first pass done.** `xorae prune` gives product
+   0.1749 at 1,400 gates and 0.1775 at 1,300 (from 0.1722 at 1,547), steepening
+   below 1,200. The greedy bypass rule is crude — better pruning (retrain or
+   fine-tune after each cut, or remove whole cones) could move this curve.
 4. **Inversions are 42% of the budget.** In the shipped model 907 of 2,165
    reachable gates are `Nand(x, x)` (i.e. `NOT x`), and only 627 of those are
    distinct wires. A trainer that lets a gate consume an inverted wire for free
@@ -276,8 +287,12 @@ Do not spend time re-running these.
 - `train-nand --train-limit N` trains on the first N samples (memorisation
   diagnostics). `--ste` and `--wire-ste` are the straight-through variants; both
   are documented negatives, kept as experiment switches.
-- `--relaxation {product,min,lukasiewicz}` selects the gate t-norm. `min`
-  (Gödel) is the current default and is exact on diagonal gates.
+- `--relaxation {product,min,lukasiewicz}` selects the gate t-norm. `product`
+  is the default; `min` (Gödel) wins at equal training budget but loses badly
+  once circuits are compressed to the same size (see Checkpoint 7).
+- `xorae prune --target N [--tolerance T]` is the *lossy* size pass (bypass +
+  dead-code elimination, greedy on a calibration sample). `simplify` is the
+  exact one; use `simplify` first.
 - Solid is pinned to `2.0.0-rc.19` and uses `onSettled` (not `onMount`).
 - Headless Chrome needs `--virtual-time-budget=40000`; 20 s is too short for
   image decode.

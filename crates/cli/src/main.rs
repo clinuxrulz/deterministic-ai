@@ -148,6 +148,27 @@ enum CliCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Lossy gate removal: bypass gates while BER stays within a tolerance.
+    Prune {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Stop once the circuit has at most this many gates.
+        #[arg(long)]
+        target: Option<usize>,
+        /// Largest absolute BER increase accepted per removal.
+        #[arg(long, default_value_t = 0.0)]
+        tolerance: f32,
+        /// Samples used to score candidate removals.
+        #[arg(long, default_value_t = 512)]
+        calibrate: usize,
+        /// Hard cap on removals.
+        #[arg(long, default_value_t = 4096)]
+        max_removals: usize,
+    },
     /// Exact simplification (constant folding + CSE + dead-gate removal).
     ///
     /// Rewrites are Boolean identities, so the output computes the same
@@ -511,6 +532,61 @@ fn main() -> Result<()> {
             }
             std::fs::write(&out, json)?;
             println!("exported model to {}", out.display());
+            Ok(())
+        }
+        CliCommand::Prune {
+            model,
+            data,
+            out,
+            target,
+            tolerance,
+            calibrate,
+            max_removals,
+        } => {
+            let mut model = load_model(&model)?;
+            let dataset = Dataset::load(&data)?;
+            let opts = nand::PruneOptions {
+                target,
+                tolerance,
+                calibrate,
+                max_removals,
+            };
+            let (encoder, decoder, stats) = nand::prune_gates(
+                &model.encoder,
+                &model.decoder,
+                &dataset,
+                model.config.seed,
+                opts,
+            );
+            model.encoder = encoder;
+            model.decoder = decoder;
+            model.validate().map_err(anyhow::Error::msg)?;
+
+            let (_, _, test) = dataset.split_indices(model.config.seed);
+            let report = ga::evaluate_model(&model, &dataset, &test)?;
+            model.metrics.test_ber = report.ber;
+            model.metrics.abs_mae = report.abs_mae;
+            model.metrics.color_mae = report.color_mae;
+            model.metrics.psnr = report.psnr;
+            model.metrics.index_accuracy = report.index_accuracy;
+            model.metrics.active_gates =
+                model.encoder.active_gates() + model.decoder.active_gates();
+
+            println!(
+                "prune: {} -> {} gates ({} removed) | calibration BER {:.4} -> {:.4} | test BER {:.4} | AIG nodes {}",
+                stats.gates_before,
+                stats.gates_after,
+                stats.removed,
+                stats.ber_before,
+                stats.ber_after,
+                report.ber,
+                model.encoder.aig_nodes() + model.decoder.aig_nodes()
+            );
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&out, model.to_json().map_err(anyhow::Error::msg)?)?;
+            println!("wrote {}", out.display());
             Ok(())
         }
         CliCommand::Simplify {

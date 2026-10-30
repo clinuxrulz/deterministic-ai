@@ -617,3 +617,58 @@ cargo run --release -p xorae -- train-nand \
   --config configs/cats32_nand.toml \
   --data data/cats32_threshold.bin --out runs/nand32_godel --seed 0
 ```
+## Checkpoint 7 (2026-10-30): size-vs-BER frontier (lossy gate removal)
+
+`xorae prune` removes gates by bypassing each one to one of its inputs and
+re-running dead-code elimination. Candidates are tried in ascending fanout
+order; a removal is accepted if calibration BER rises by at most `--tolerance`,
+and every acceptance restarts the scan because indices shift. Score is measured
+on a train sample (`--calibrate`, default 512) and reported on test.
+
+This is deliberately *lossy* — unlike `simplify`, which is exact by
+construction. It is the "gate removal for size" thread.
+
+### Product model, seed 42 (base 0.1722 at 1,547 gates)
+
+| gates | test BER | AIG nodes |
+|---|---|---|
+| 1,547 | 0.1722 | 986 |
+| 1,400 | 0.1749 | 910 |
+| 1,300 | 0.1775 | 831 |
+| 1,200 | 0.2047 | 756 |
+| 1,100 | 0.2335 | 668 |
+| 1,000 | 0.2486 | 591 |
+
+Removing ~150 gates (10%) costs 0.003; the curve then steepens sharply below
+1,200. With `--tolerance 0` the pass stalls at a local optimum (nothing is
+accepted that worsens BER at all), so a small tolerance is needed to get a
+frontier.
+
+### Gödel vs product at equal size
+
+Checkpoint 6 found Gödel `min` better at equal *training* budget. Here both are
+pruned to a fixed gate count, 5 paired seeds, tolerance 0.0005:
+
+| target | min (Gödel) | product | paired (min − product) |
+|---|---|---|---|
+| 1,400 gates | 0.2154 ± 0.0167 | **0.1811 ± 0.0057** | +0.0344 (t = 5.6), min wins 0/5 |
+| 1,300 gates | 0.2401 ± 0.0151 | **0.1882 ± 0.0157** | +0.0519 (t = 7.5), min wins 0/5 |
+
+**The relaxation moves the whole curve rather than dominating.** Gödel buys
+its accuracy at equal training budget by keeping more real logic (77% vs 65% of
+gates), but those extra gates are load-bearing: compress both to the same size
+and product wins decisively.
+
+Consequence: `configs/cats32_nand.toml` stays on `relaxation = "product"`.
+Gödel remains the best option if the training budget is fixed and output size
+is free, or if exact NOT gates matter for interpretability; it is the wrong
+default for a project whose headline is "tiny circuit".
+
+### Reproduce
+
+```bash
+cargo run --release -p xorae -- prune \
+  --model web/public/models/cats32-nand.json \
+  --data data/cats32_threshold.bin \
+  --out runs/cats32-pruned-1400.json --target 1400 --tolerance 0.0005
+```

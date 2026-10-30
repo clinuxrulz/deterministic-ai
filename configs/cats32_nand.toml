@@ -30,14 +30,16 @@ anneal_fraction = 0.85
 polish_sweeps = 2
 polish_samples = 512
 
-# Gate relaxation. `min` is the Gödel t-norm: NAND(a,b) = 1 - min(a,b).
-# It makes diagonal gates exact (NAND(x,x) = 1 - x, i.e. a true NOT), which
-# product (1 - a*b) does not. Over 10 paired seeds it gives test BER
-# 0.1641 +- 0.0093 vs 0.1730 +- 0.0060 for `product`, at the cost of ~17% more
-# gates after simplification (1,843 vs 1,572) and a higher inverter share
-# (22.7% vs 34.7% -> 77.3% of gates are real two-input logic instead of 65.3%).
-# Alternatives: `product` (previous default), `lukasiewicz` (much worse).
-relaxation = "min"
+# Gate relaxation. `product` (1 - a*b) is the default: it is slightly worse at
+# equal *training* budget than Gödel `min` (0.1730 vs 0.1641 over 10 seeds) but
+# much better at equal *exported size*, which is what this project optimises.
+# On the size-BER frontier (5 seeds, lossy pruning to a fixed gate count):
+#   1,400 gates: product 0.1811 +- 0.0057 vs min 0.2154 +- 0.0167
+#   1,300 gates: product 0.1882 +- 0.0157 vs min 0.2401 +- 0.0151
+# Gödel keeps 77% of gates as real two-input logic instead of 65%, but those
+# extra gates are load-bearing, so it degrades much faster when compressed.
+# See docs/experiment.md, Checkpoints 6 and 7.
+relaxation = "product"
 
 seed = 42
 log_every = 10
