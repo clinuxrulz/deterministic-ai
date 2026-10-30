@@ -85,6 +85,24 @@ A single run is therefore only good to about ±0.013 (2 sd). Compare
 configurations **paired on the same seed** — same seed means same split and same
 init — and treat anything under ~0.01 as unresolved.
 
+## Hosting
+
+The demo is published to **https://clinuxrulz.github.io/deterministic-ai/** by
+`.github/workflows/gh-pages.yml`: on every push to `main` it installs Rust with
+the `wasm32-unknown-unknown` target, `wasm-pack` and Node, runs `npm run build`
+in `web/` (which builds the wasm package first), and pushes `web/dist` to the
+`gh-pages` branch with `peaceiris/actions-gh-pages`.
+
+Two things make the sub-path work: Vite's `base` is read from `SITE_BASE`
+(`/deterministic-ai/` in the workflow, `/` locally), and the app resolves every
+asset through `import.meta.env.BASE_URL`.
+
+One-time repository setting: **Settings → Pages → Source: Deploy from a branch
+→ `gh-pages` / (root)**. The branch only exists after the first successful run.
+
+`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo test --workspace`,
+`cargo clippy --workspace --all-targets` and a web build on pushes and PRs.
+
 ## Setup on a fresh machine
 
 ```bash

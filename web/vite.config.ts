@@ -1,7 +1,17 @@
 import { defineConfig } from "vite";
 import solid from "@solidjs/vite-plugin";
 
+// Project Pages are served from a sub-path, so the deploy workflow sets
+// SITE_BASE=/deterministic-ai/. Local dev and `vite preview` keep "/".
+const siteBase =
+  (
+    globalThis as {
+      process?: { env?: Record<string, string | undefined> };
+    }
+  ).process?.env?.SITE_BASE ?? "/";
+
 export default defineConfig({
+  base: siteBase,
   plugins: [solid()],
   server: {
     port: 3000,

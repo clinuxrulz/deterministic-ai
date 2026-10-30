@@ -1,0 +1,59 @@
+name: Deploy the demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gh-pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The site is built from Rust (the circuits) and TypeScript (the UI).
+      - name: Install Rust with the wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      # `npm run build` runs the wasm build first (prebuild -> scripts/build-wasm.sh),
+      # then `vite build`. SITE_BASE makes every asset and fetch resolve under
+      # https://clinuxrulz.github.io/deterministic-ai/.
+      - name: Build the wasm package and the site
+        run: npm run build
+        working-directory: web
+        env:
+          SITE_BASE: /deterministic-ai/
+          CARGO_TERM_COLOR: always
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./web/dist
+          publish_branch: gh-pages
