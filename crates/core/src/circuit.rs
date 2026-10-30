@@ -401,6 +401,22 @@ impl Circuit {
             .count()
     }
 
+    /// Longest path from any input to any output, in gates.
+    pub fn depth(&self) -> usize {
+        let total = self.total_wires();
+        let mut depth = vec![0usize; total];
+        for (i, gate) in self.gates.iter().enumerate() {
+            let wire = self.gate_start() + i;
+            let d = depth[gate.a as usize].max(depth[gate.b as usize]) + 1;
+            depth[wire] = d;
+        }
+        self.outputs
+            .iter()
+            .map(|&o| depth[o as usize])
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Exact simplification: constant folding, hash-consing (CSE) and
     /// dead-gate removal.
     ///

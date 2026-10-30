@@ -208,6 +208,11 @@ enum CliCommand {
         #[arg(long, default_value = "product")]
         relaxation: String,
     },
+    /// Validate and describe a standalone circuit JSON (e.g. an exported GAN).
+    CircuitInfo {
+        #[arg(long)]
+        circuit: PathBuf,
+    },
     /// Score a saved NAND classifier circuit on a dataset split.
     EvalCircuit {
         #[arg(long)]
@@ -832,6 +837,30 @@ fn main() -> Result<()> {
                 serde_json::to_string_pretty(&circuit).context("serialising circuit")?,
             )?;
             println!("wrote {}", out.display());
+            Ok(())
+        }
+        CliCommand::CircuitInfo { circuit } => {
+            let text = std::fs::read_to_string(&circuit)
+                .with_context(|| format!("reading {}", circuit.display()))?;
+            let circuit: xorae_core::Circuit =
+                serde_json::from_str(&text).context("parsing circuit")?;
+            circuit.validate().map_err(anyhow::Error::msg)?;
+            let depth = circuit.depth();
+            let aig = circuit.aig_nodes();
+            println!(
+                "circuit: {} inputs, {} gates, {} outputs | depth {depth} | active {} | AIG nodes {aig}",
+                circuit.n_inputs,
+                circuit.gates.len(),
+                circuit.outputs.len(),
+                circuit.active_gates(),
+            );
+            let mut fanout = std::collections::HashMap::new();
+            for gate in &circuit.gates {
+                *fanout.entry(gate.a).or_insert(0usize) += 1;
+                *fanout.entry(gate.b).or_insert(0usize) += 1;
+            }
+            let max_fanout = fanout.values().copied().max().unwrap_or(0);
+            println!("max fanout {max_fanout}");
             Ok(())
         }
         CliCommand::EvalCircuit {
