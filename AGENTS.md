@@ -103,6 +103,39 @@ One-time repository setting: **Settings → Pages → Source: Deploy from a bran
 `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo test --workspace`,
 `cargo clippy --workspace --all-targets` and a web build on pushes and PRs.
 
+## GPU (probe results, 2026-10-30)
+
+`crates/gpu-probe` enumerates Vulkan devices and benchmarks the trainer's inner
+loop (candidate gather + weighted NAND sum) against the CPU.
+
+**On Termux the loader matters.** The default `libvulkan.so` resolves to Mesa's
+software `llvmpipe` (CPU). The real GPU is only visible through the Android
+system loader:
+
+```bash
+XORAE_VULKAN_LIB=/system/lib64/libvulkan.so cargo run --release -p xorae-gpu-probe
+# device 0: Samsung Xclipse 530, INTEGRATED_GPU, api 1.3.279
+XORAE_VULKAN_LIB=/system/lib64/libvulkan.so cargo run --release -p xorae-gpu-probe -- --bench
+```
+
+Benchmark (Exynos 1480, 8 cores), gather kernel at `gates × candidates × samples`:
+
+| config | GPU | CPU (7 threads) | speedup |
+|---|---|---|---|
+| 4,096 × 16 × 256 | 9.8 ms | 14.7 ms | 1.5× |
+| 4,096 × 16 × 1,024 | 24.3 ms | 35.8 ms | 1.5× |
+| 16,384 × 16 × 512 | 38.2 ms | 80.9 ms | 2.1× |
+| 16,384 × 24 × 1,024 | 101.1 ms | 222.7 ms | 2.2× |
+
+Both sides are memory-bound (~16 GB/s of gather traffic, 8 vs 3.6 GFLOP/s), so
+the mobile GPU is **not** worth porting the trainer for: 2× is not enough.
+The same kernels on a desktop GPU should be a different story, because the
+pattern is bandwidth-bound and desktop memory is 20-50× faster.
+
+If a GPU trainer is built, raise arithmetic intensity first (tile each layer's
+activations through shared/workgroup memory so a wire is loaded once for all
+its consumers) rather than transliterating the CPU loop.
+
 ## Setup on a fresh machine
 
 ```bash

@@ -1,0 +1,18 @@
+[package]
+name = "xorae-gpu-probe"
+description = "Enumerate Vulkan devices reachable from this machine/Termux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "gpu-probe"
+path = "src/main.rs"
+
+[dependencies]
+ash = { version = "0.38", features = ["loaded"] }
+anyhow = { workspace = true }
+libloading = "0.8"
+naga = { version = "22", features = ["wgsl-in", "spv-out"] }
+rayon = { workspace = true }
