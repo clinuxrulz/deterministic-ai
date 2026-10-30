@@ -876,6 +876,39 @@ fn main() -> Result<()> {
                 acc
             );
             println!("predicted distribution: {:?}", hist);
+
+            // Per-class recall and a confusion matrix: overall accuracy is
+            // frequency-weighted, so a rare class can be badly served without
+            // moving the headline number.
+            let mut matrix = vec![vec![0usize; classes]; classes];
+            for (key, &label) in keys.iter().zip(labels.iter()) {
+                let predicted = nand_classify::predict(&circuit, key, classes, group_size);
+                if (label as usize) < classes && predicted < classes {
+                    matrix[label as usize][predicted] += 1;
+                }
+            }
+            let mut recalls = Vec::with_capacity(classes);
+            for (label, row) in matrix.iter().enumerate() {
+                let total: usize = row.iter().sum();
+                let recall = if total > 0 {
+                    row[label] as f32 / total as f32
+                } else {
+                    0.0
+                };
+                recalls.push(recall);
+                println!("  {label}: recall {recall:.3}  counts {:?}", row);
+            }
+            let macro_recall: f32 = recalls.iter().sum::<f32>() / classes.max(1) as f32;
+            let worst = recalls
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, r)| (i, *r))
+                .unwrap_or((0, 0.0));
+            println!(
+                "macro recall {macro_recall:.4} | worst class {} ({:.3})",
+                worst.0, worst.1
+            );
             Ok(())
         }
         CliCommand::Prior {

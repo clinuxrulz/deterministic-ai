@@ -456,3 +456,24 @@ button:focus,
     max-width: none;
   }
 }
+
+.digit-confidence {
+  margin: -0.25rem 0 0;
+  text-align: center;
+  color: var(--muted, #9aa4b5);
+  font-variant-numeric: tabular-nums;
+}
+
+.vote.winner .vote-fill {
+  background: var(--accent, #6ea8fe);
+}
+
+.vote.runner .vote-fill {
+  background: rgba(110, 168, 254, 0.45);
+}
+
+.vote.winner .vote-label,
+.vote.winner .vote-count {
+  color: var(--accent, #6ea8fe);
+  font-weight: 600;
+}

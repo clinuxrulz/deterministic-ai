@@ -490,6 +490,18 @@ fn argmax(values: &[f32]) -> usize {
     best
 }
 
+/// Predicted class for one feature vector.
+pub fn predict(circuit: &Circuit, input: &[u8], classes: usize, group: usize) -> usize {
+    let mut planes = vec![0u64; circuit.n_inputs as usize];
+    for (j, slot) in planes.iter_mut().enumerate() {
+        *slot = *input.get(j).unwrap_or(&0) as u64;
+    }
+    let mut arena = Vec::new();
+    let mut out = Vec::new();
+    circuit.eval_into(&planes, 1, &mut arena, &mut out);
+    argmax_group(&out, classes, group)
+}
+
 /// Fraction of samples whose argmax output equals the label.
 pub fn accuracy(
     circuit: &Circuit,

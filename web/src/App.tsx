@@ -586,6 +586,7 @@ function DigitLab() {
   const [prediction, setPrediction] = createSignal<number | null>(null);
   const [votes, setVotes] = createSignal<number[]>([]);
   const [groupSize, setGroupSize] = createSignal(16);
+  const [runnerUp, setRunnerUp] = createSignal<{ digit: number; votes: number } | null>(null);
 
   const clear = () => {
     const canvas = drawRef;
@@ -596,6 +597,7 @@ function DigitLab() {
     context.fillRect(0, 0, canvas.width, canvas.height);
     setPrediction(null);
     setVotes([]);
+    setRunnerUp(null);
   };
 
   const paintBits = (bits: Uint8Array, side: number) => {
@@ -663,10 +665,26 @@ function DigitLab() {
     });
     let best = 0;
     for (let c = 1; c < classes; c += 1) if (scores[c] > scores[best]) best = c;
+    let second = -1;
+    for (let c = 0; c < classes; c += 1) {
+      if (c !== best && (second < 0 || scores[c] > scores[second])) second = c;
+    }
     setGroupSize(group);
     setVotes(scores);
     setPrediction(best);
+    setRunnerUp(second >= 0 ? { digit: second, votes: scores[second] } : null);
   };
+
+  // The vote margin is the model's own uncertainty: 16 pins per class, so a
+  // one- or two-vote gap means the answer could easily be the runner-up.
+  const certaintyText = createMemo(() => {
+    const predicted = prediction();
+    const runner = runnerUp();
+    if (predicted === null || !runner) return "";
+    const top = votes()[predicted] ?? 0;
+    const close = top - runner.votes <= 2;
+    return `${top}/${groupSize()} votes${close ? ` · close call, could be a ${runner.digit}` : ""}`;
+  });
 
   const selfTest = () => {
     if (!sample) return;
@@ -787,10 +805,21 @@ function DigitLab() {
       <div class="digit-panel">
         <p class="digit-prediction">{prediction() === null ? "–" : prediction()}</p>
         <p class="hint">predicted digit</p>
+        <Show when={certaintyText()}>
+          {(text) => <p class="digit-confidence">{text()}</p>}
+        </Show>
         <div class="votes">
           <For each={votes()}>
             {(score, index) => (
-              <div class="vote">
+              <div
+                class={
+                  index() === prediction()
+                    ? "vote winner"
+                    : runnerUp()?.digit === index()
+                      ? "vote runner"
+                      : "vote"
+                }
+              >
                 <span class="vote-label">{index()}</span>
                 <div class="vote-bar">
                   <div
