@@ -18,6 +18,19 @@ reachable but only ~2× the CPU for this access pattern). So training runs on a
 desktop; everything else — dataset parsing and the exported gate format — is
 tested here.
 
+## Quick test in Colab (no install)
+
+`gan/binarygan_colab.ipynb` is self-contained: it pulls CIFAR-10 from
+torchvision, defines the gate generator inline, trains for a few thousand
+steps, shows samples, slaps the wiring, and writes `gan16_circuit.json` for
+`xorae circuit-info`. Nothing to install — Colab already has torch, torchvision
+and matplotlib.
+
+Mobile caveat: the notebook will run in a phone browser, but a backgrounded tab
+suspends and Colab disconnects when that happens. For a short run (2-4k steps,
+10-20 min) keep the tab in the foreground with the screen on; for anything
+longer, use a desktop.
+
 ## Setup
 
 ```bash
