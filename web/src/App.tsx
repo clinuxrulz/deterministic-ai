@@ -562,15 +562,12 @@ function toModelBits(source: HTMLCanvasElement): Uint8Array | null {
   cctx.fillRect(0, 0, 28, 28);
   cctx.drawImage(small, dx, dy);
 
-  // Threshold, then nearest-upsample 28 -> 32 to match the dataset loader.
+  // Threshold at 28x28: the classifier reads raw pixel bits, so there is no
+  // 28 -> 32 resampling step any more.
   const src = cctx.getImageData(0, 0, 28, 28).data;
-  const bits = new Uint8Array(32 * 32);
-  for (let y = 0; y < 32; y += 1) {
-    const sy2 = Math.min(27, Math.floor((y * 28) / 32));
-    for (let x = 0; x < 32; x += 1) {
-      const sx2 = Math.min(27, Math.floor((x * 28) / 32));
-      bits[y * 32 + x] = src[(sy2 * 28 + sx2) * 4] >= 128 ? 1 : 0;
-    }
+  const bits = new Uint8Array(28 * 28);
+  for (let i = 0; i < bits.length; i += 1) {
+    bits[i] = src[i * 4] >= 128 ? 1 : 0;
   }
   return bits;
 }
@@ -579,7 +576,6 @@ function DigitLab() {
   const params = new URLSearchParams(window.location.search);
   let drawRef: HTMLCanvasElement | undefined;
   let previewRef: HTMLCanvasElement | undefined;
-  let model: ModelHandle | null = null;
   let meta: DigitMeta | null = null;
   let circuitJson = "";
   let sample: DigitSample | null = null;
@@ -649,7 +645,7 @@ function DigitLab() {
 
   const classify = () => {
     const canvas = drawRef;
-    if (!canvas || !model || !meta) return;
+    if (!canvas || !meta) return;
     const bits = toModelBits(canvas);
     if (!bits) {
       setPrediction(null);
@@ -657,8 +653,7 @@ function DigitLab() {
       return;
     }
     drawPreview(bits);
-    const key = model.encode(bits);
-    const out = run_circuit(circuitJson, key);
+    const out = run_circuit(circuitJson, bits);
     const classes = meta.classes;
     const group = meta.group_size;
     const scores = Array.from({ length: classes }, (_, c) => {
@@ -734,11 +729,7 @@ function DigitLab() {
   onSettled(() => {
     void (async () => {
       try {
-        const [modelJson, metaJson, circuitText, sampleJson] = await Promise.all([
-          fetch(asset("models/mnist32.json")).then((r) => {
-            if (!r.ok) throw new Error(`mnist32.json: HTTP ${r.status}`);
-            return r.text();
-          }),
+        const [metaJson, circuitText, sampleJson] = await Promise.all([
           fetchJson<DigitMeta>(asset("digits/meta.json")),
           fetch(asset("digits/classifier.json")).then((r) => {
             if (!r.ok) throw new Error(`classifier.json: HTTP ${r.status}`);
@@ -747,14 +738,13 @@ function DigitLab() {
           fetchJson<DigitSample>(asset("digits/sample.json")),
         ]);
         await wasmReady;
-        model = new ModelHandle(modelJson);
         meta = metaJson;
         circuitJson = circuitText;
         sample = sampleJson;
         setGroupSize(metaJson.group_size);
         clear();
         setStatus(
-          `ready · ${metaJson.gates} NAND gates · ${(metaJson.test_accuracy * 100).toFixed(1)}% on MNIST test`,
+          `ready · ${metaJson.gates} NAND gates, no weights · ${(metaJson.test_accuracy * 100).toFixed(1)}% on MNIST test`,
         );
         if (params.get("selftest") === "1") {
           selfTest();
@@ -814,7 +804,7 @@ function DigitLab() {
           </For>
         </div>
         <canvas ref={previewRef} class="digit-preview" width={128} height={128} />
-        <p class="hint">what the circuit sees · 32×32 thresholded</p>
+        <p class="hint">what the circuit sees · 28×28 thresholded pixels</p>
       </div>
     </section>
   );

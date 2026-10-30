@@ -202,8 +202,26 @@ enum CliCommand {
         /// Distil a trained softmax classifier (from `classify`) into the circuit.
         #[arg(long)]
         distill: Option<PathBuf>,
+        /// Features for the circuit: `keys` (encoder output) or `pixels`.
+        #[arg(long, default_value = "keys")]
+        features: String,
         #[arg(long, default_value = "product")]
         relaxation: String,
+    },
+    /// Score a saved NAND classifier circuit on a dataset split.
+    EvalCircuit {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        circuit: PathBuf,
+        /// Features the circuit was trained on: `keys` or `pixels`.
+        #[arg(long, default_value = "keys")]
+        features: String,
+        /// Output gates per class.
+        #[arg(long, default_value_t = 16)]
+        group_size: usize,
     },
     /// Fit a prior over the encoder's 128-bit key space and sample from it.
     Prior {
@@ -681,6 +699,7 @@ fn main() -> Result<()> {
             group_size,
             subset_labels,
             distill,
+            features,
             relaxation,
         } => {
             let model = load_model(&model)?;
@@ -704,7 +723,11 @@ fn main() -> Result<()> {
                 other => bail!("unknown relaxation {other}"),
             };
             let (train, _, test) = dataset.split_indices(model.config.seed);
+            let pixels = features == "pixels";
             let keys_for = |idx: &[usize]| -> Result<Vec<Vec<u8>>> {
+                if pixels {
+                    return Ok(idx.iter().map(|&i| dataset.row_bits(i)).collect());
+                }
                 idx.iter()
                     .map(|&i| {
                         model
@@ -744,8 +767,9 @@ fn main() -> Result<()> {
             } else {
                 dataset.label_count.max(1)
             };
+            let inputs = train_keys.first().map(|k| k.len()).unwrap_or(0);
             let cfg = nand_classify::NandClassifyConfig {
-                inputs: model.config.key_bits,
+                inputs,
                 classes,
                 hidden,
                 epochs,
@@ -808,6 +832,50 @@ fn main() -> Result<()> {
                 serde_json::to_string_pretty(&circuit).context("serialising circuit")?,
             )?;
             println!("wrote {}", out.display());
+            Ok(())
+        }
+        CliCommand::EvalCircuit {
+            model,
+            data,
+            circuit,
+            features,
+            group_size,
+        } => {
+            let model = load_model(&model)?;
+            let dataset = Dataset::load(&data)?;
+            if !dataset.has_labels() {
+                bail!("dataset {} has no labels", data.display());
+            }
+            let text = std::fs::read_to_string(&circuit)
+                .with_context(|| format!("reading {}", circuit.display()))?;
+            let circuit: xorae_core::Circuit =
+                serde_json::from_str(&text).context("parsing circuit")?;
+            let (_, _, test) = dataset.split_indices(model.config.seed);
+            let pixels = features == "pixels";
+            let keys: Vec<Vec<u8>> = test
+                .iter()
+                .map(|&i| -> Result<Vec<u8>> {
+                    if pixels {
+                        return Ok(dataset.row_bits(i));
+                    }
+                    model
+                        .infer_bits(&dataset.row_bits(i))
+                        .map(|(k, _)| k)
+                        .map_err(anyhow::Error::msg)
+                })
+                .collect::<Result<_>>()?;
+            let labels: Vec<u8> = test.iter().map(|&i| dataset.labels[i]).collect();
+            let classes = dataset.label_count.max(1);
+            let acc = nand_classify::accuracy(&circuit, &keys, &labels, classes, group_size);
+            let hist = nand_classify::prediction_histogram(&circuit, &keys, classes, group_size);
+            println!(
+                "circuit: {} inputs, {} gates, {} classes, group {group_size} | test acc {:.4}",
+                circuit.n_inputs,
+                circuit.gates.len(),
+                classes,
+                acc
+            );
+            println!("predicted distribution: {:?}", hist);
             Ok(())
         }
         CliCommand::Prior {

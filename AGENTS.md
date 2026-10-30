@@ -198,7 +198,8 @@ cargo run --release -p xorae -- export \
 | `prune` | Lossy size pass: bypass gates while BER stays within `--tolerance`, down to `--target` gates |
 | `prior` | Fit Bernoulli / autoregressive priors over the key space, sample, decode, report NLL and round-trip |
 | `classify` | Softmax regression on keys or raw pixels; accuracy + confusion matrix |
-| `classify-nand` | Train a NAND circuit classifier on keys (grouped vote outputs; `--distill` accepts a `classify` model) |
+| `classify-nand` | Train a NAND circuit classifier on keys or pixels (grouped vote outputs; `--features`, `--distill`) |
+| `eval-circuit` | Score a saved classifier circuit on a dataset split (no retraining) |
 | `export` | Copy a model into `web/public/models/` |
 | `export-samples` | 32×32 RGB previews for the demo gallery |
 
@@ -271,13 +272,14 @@ Do not spend time re-running these.
 1. **The key classifies, and an all-NAND circuit can too.** On MNIST, softmax
    regression on the 128-bit key gets **82.0%** (raw pixels: 88.9%), so 8x
    compression costs ~7 points of class information. A NAND circuit on the same
-   keys reaches **77.4%** with **392 gates, depth 3** — no multipliers or
-   weights. Size is the lever: 46 collapsed gates give 36.9%, 228 give 70.3%,
-   370 give 75.5%, 392 give 77.4%. Distillation from the 82% teacher did *not* help (67.8%),
-   and probes plateau by epoch 100, so the circuit is capacity-limited rather
-   than label- or epoch-limited. Labels live in `XAE5`; see `classify` and
-   `classify-nand`. Next: bigger circuits, or an encoder trained for
-   classification as well as reconstruction.
+   keys reaches **77.4%** with 392 gates; a circuit reading **784 raw pixels**
+   does better: **80.5% with 429 gates**. Bypassing the 98-bit key is worth
+   ~5 points and removes a stage, so that is what the demo runs. Size is the
+   lever: 46 collapsed gates give 36.9%, 228 give 70.3%, 370 give 75.5%, 392
+   give 77.4%. Distillation from the softmax teacher did *not* help (67.8%),
+   and probes plateau by epoch 100. Utilisation is the open problem: only 429
+   of 928 trained gates survive simplification. Labels live in `XAE5`; see
+   `classify`, `classify-nand` and `eval-circuit`.
 2. **Key space is generative, not just a codebook.** `xorae prior` fits a
    causal linear AR model over the 128-bit keys: on MNIST it reaches 0.318
    bits/bit held-out (about 41 bits of entropy) and its samples round-trip as
@@ -341,7 +343,13 @@ Do not spend time re-running these.
   model scores 0.2254 while all-zero scores 0.1366, despite reconstructing
   recognisable digits. Use IoU/F1 or balanced accuracy there.
 - MNIST is fetched separately: `./scripts/fetch_mnist.sh data/mnist`, then
-  `preprocess --mnist-dir ... --limit N`. `XAE4` stores no labels.
+  `preprocess --mnist-dir ... --limit N`.
+- **Memory is tight on the phone.** The full 28×28 MNIST dataset is 270 MB on
+  disk and the loader keeps `rgb` (n·px·3) and `values` (n·px) in RAM even for
+  grayscale training; training then makes an f32 copy of the training split
+  (`n_train × cols × 4`). A 48k-image 28×28 run pushes the device into swap and
+  background jobs get killed. Use `--limit 12000` for experiments, keep
+  `RAYON_NUM_THREADS` at 6 or lower, and do not compile during a long run.
 - Solid is pinned to `2.0.0-rc.19` and uses `onSettled` (not `onMount`).
 - Headless Chrome needs `--virtual-time-budget=40000`; 20 s is too short for
   image decode.

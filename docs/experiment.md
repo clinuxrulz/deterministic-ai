@@ -854,3 +854,35 @@ Assets: `web/public/models/mnist32.json` (autoencoder),
 Verified headlessly with
 `?tab=digits&selftest=1`: the built-in 7 is drawn, normalised, encoded and
 classified as **7** (15/16 votes), zero console errors.
+
+### Follow-up: full data, native 28×28, and skipping the key
+
+Three changes were tested against the previous MNIST setup (32×32, 12k images,
+128-bit key): native 28×28 (784 bits, 98-bit key), the full 48k training split,
+and a classifier that reads raw pixels instead of the key.
+
+| read-out | 32×32 / 12k | 28×28 / 48k |
+|---|---|---|
+| softmax on key bits | 82.0% (128 bits) | 82.5% (98 bits) |
+| softmax on pixels | 88.9% (1,024) | **91.7%** (784) |
+| **NAND circuit on key bits** | 77.4% (392 gates) | 75.2% (324 gates) |
+| **NAND circuit on pixels** | — | **80.5%** (429 gates) |
+
+Three conclusions:
+
+- **The BER improvement was background.** Test BER fell from 0.2254 to 0.1704,
+  but 86% of MNIST pixels are black, so that is mostly "predict black
+  correctly". Reconstruction renders still show heavy stroke noise, and the
+  key-fed circuit got *worse* (77.4 → 75.2). Use accuracy, not BER, on sparse
+  data.
+- **More data helps the pixels, not the code.** The pixel softmax gained 2.8
+  points from the extra 36k images; the key read-out gained 0.5. Consistent
+  with the 100-image memorisation failure: the encoder, not the data, is the
+  limit.
+- **Bypassing the key is worth ~5 points for a gate circuit**, and removes a
+  whole stage: normalise the stroke, threshold to 784 bits, run 429 gates.
+  That is now what the web demo does.
+
+The gate search still trails the linear read-out by more than it does on keys
+(11.2 vs 7.3 points), and only 429 of 928 trained gates survive simplification,
+so utilisation remains the open problem.

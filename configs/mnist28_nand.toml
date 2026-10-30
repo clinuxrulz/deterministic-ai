@@ -1,0 +1,32 @@
+# NAND-only autoencoder on native 28x28 binarized MNIST, full 60k training set.
+#
+# 784 bits -> 98-bit key (8x), hierarchy 28x28 -> 14x28 -> 7x28 -> 7x14.
+# Same compression ratio as the 32x32 model, but no 28->32 resampling blur.
+image_size = 28
+channels = 1
+key_bits = 98
+hidden = [392, 196]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+relaxation = "product"
+
+polish_sweeps = 2
+polish_samples = 512
+
+seed = 42
+log_every = 10
+val_every = 25
