@@ -10,6 +10,22 @@ The discriminator is an ordinary small CNN. That is deliberate — the point of
 this directory is to find out whether a *gate* generator can produce
 recognisable images, without also having to hand-write a CNN in Rust.
 
+### Resolution and size knobs
+
+The single-file script takes environment variables, so 32×32 needs no edits:
+
+```bash
+!SIDE=32 HIDDEN=512,1024 LATENT=96 python binarygan_colab.py
+```
+
+Generator gates are `sum(hidden) + side²` (16×16: 1,024; 32×32: 2,560+).
+16×16 is near the substrate's limit — even the supervised Rust autoencoders
+only reach BER 0.39 there against a 0.457 all-zero baseline, versus 0.17 at
+32×32.
+
+`gan/render_circuit.py` renders samples from an exported circuit on the phone
+(stdlib only): `python gan/render_circuit.py circuit.json out.png 32`.
+
 ## Why not on the phone
 
 PyTorch has no Termux/Android aarch64 wheel, and this repo has no GPU training

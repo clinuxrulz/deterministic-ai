@@ -1,15 +1,14 @@
-"""16x16 BinaryGAN with a NAND-circuit generator -- single-file version.
+"""BinaryGAN with a NAND-circuit generator -- single-file Colab version.
 
-Paste this whole file into one Colab cell, or run:
+    !python binarygan_colab.py                  # 16x16, 1,024 gates
+    SIDE=32 HIDDEN=512,1024 LATENT=96 python binarygan_colab.py   # 32x32
 
-    !python binarygan_colab.py
+Only needs torch, torchvision and matplotlib (preinstalled on Colab).
+Downloads CIFAR-10, trains, shows samples, snaps the wiring to a literal NAND
+circuit and writes gan{side}_circuit.json.
 
-Only needs torch, torchvision and matplotlib (all preinstalled on Colab).
-Downloads CIFAR-10, trains 20k steps, shows samples, snaps the wiring to a
-literal NAND circuit and writes gan16_circuit.json.
-
-Generator: 64-bit latent -> 256 -> 512 -> 256 pixels = 1,024 NAND gates.
-Discriminator: ~9k parameters, kept small on purpose (see the comment).
+The generator's gate count is sum(hidden) + side*side; the discriminator is
+deliberately small (see its comment) so it cannot win immediately.
 """
 
 import torch, torchvision, sys
@@ -18,12 +17,16 @@ print("torch", torch.__version__, "torchvision", torchvision.__version__)
 print("cuda", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+import os
 import torch
 from torchvision import transforms, datasets
 
+SIDE = int(os.environ.get("SIDE", "16"))
+print("resolution", SIDE, "x", SIDE)
+
 tf = transforms.Compose([
     transforms.Grayscale(),
-    transforms.Resize((16, 16), interpolation=transforms.InterpolationMode.BOX),
+    transforms.Resize((SIDE, SIDE), interpolation=transforms.InterpolationMode.BOX),
     transforms.ToTensor(),
 ])
 train = datasets.CIFAR10(root="./cifar", train=True, download=True, transform=tf)
@@ -115,8 +118,11 @@ def latent(batch, bits, device):
 
 import time
 
-side, latent_bits, batch, steps = 16, 64, 64, 20000
-sizes = [latent_bits, 256, 512, side * side]
+side = SIDE
+latent_bits = int(os.environ.get("LATENT", "96" if SIDE == 32 else "64"))
+hidden = [int(x) for x in os.environ.get("HIDDEN", "512,1024" if SIDE == 32 else "256,512").split(",")]
+batch, steps = int(os.environ.get("BATCH", "64")), int(os.environ.get("STEPS", "20000"))
+sizes = [latent_bits, *hidden, side * side]
 G = Generator(sizes, k=16, skip_prob=0.3, seed=0).to(device)
 D = Discriminator(side).to(device)
 print("generator gates:", sum(sizes[1:]))
@@ -210,7 +216,8 @@ hard = acts[-1]
 print("soft/hard agreement:", round((soft == hard).float().mean().item(), 4))
 print("hard sample density:", round(hard.mean().item(), 3))
 
-with open("gan16_circuit.json", "w") as f:
+name = f"gan{side}_circuit.json"
+with open(name, "w") as f:
     json.dump(circuit, f)
-print("wrote gan16_circuit.json — validate locally with:")
-print("  cargo run --release -p xorae -- circuit-info --circuit gan16_circuit.json")
+print(f"wrote {name} — validate locally with:")
+print(f"  cargo run --release -p xorae -- circuit-info --circuit {name}")
