@@ -407,6 +407,9 @@ Do not spend time re-running these.
   over both directions). The chance column is not optional — at 32x32 with 15%
   ink, random spray scores 0.56, so a bare 0.57 means nothing. The shipped
   model is 0.889 vs 0.695 chance; the edge model is 0.574 vs 0.564.
+  Chamfer is reported in pixels and a blank image clamps to the image
+  diagonal: the distance transform's sentinel used to leak into the mean and
+  print 49,000,008 px whenever a reconstruction came out all zeros.
 - **The 32x32 threshold target is an inkblot.** Rendering the binarized target
   next to the 32x32 grayscale original makes it obvious that a *perfect* model
   would still output blobs, so "does it look like a cat" cannot be the measure

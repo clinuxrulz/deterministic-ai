@@ -73,6 +73,17 @@ pub fn distance_to_ink(bits: &[u8], side: usize) -> Vec<f32> {
             d[i] = best;
         }
     }
+    // A blank image leaves every entry at the sentinel. That is not a distance:
+    // clamp it to the farthest apart two pixels can be (the diagonal), so an
+    // empty prediction scores "as wrong as possible" instead of poisoning the
+    // mean with 1e9. Without this a single all-zero reconstruction made the
+    // reported chamfer 49,000,008 px.
+    let cap = side as f32 * std::f32::consts::SQRT_2;
+    for v in d.iter_mut() {
+        if *v >= INF {
+            *v = cap;
+        }
+    }
     d
 }
 
@@ -279,6 +290,18 @@ mod tests {
         assert_eq!(s.f1_far, 0.0);
         assert!(s.chamfer > 1.0);
         assert_eq!(s.pred_density, 0.0);
+    }
+
+    #[test]
+    fn blank_image_distances_are_finite() {
+        // The two-pass transform leaves the sentinel behind when there is no
+        // ink at all; it must be clamped to the diagonal, not reported as 1e9.
+        let cap = SIDE as f32 * std::f32::consts::SQRT_2;
+        let d = distance_to_ink(&blank(), SIDE);
+        assert!(d.iter().all(|v| (*v - cap).abs() < 1e-3), "unclamped {:?}", d[0]);
+        let s = scores(&vertical_line(16), &blank(), SIDE);
+        assert!((s.chamfer - cap).abs() < 1e-3, "chamfer {}", s.chamfer);
+        assert!(s.chamfer < 100.0, "chamfer {} is not in pixels", s.chamfer);
     }
 
     #[test]
