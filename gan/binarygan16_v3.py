@@ -24,14 +24,20 @@ n_critic 2, 150k steps -- so the comparison against v2 is clean. The default
 shape [32, 512, 768, 768, 256] is exactly 2,304 gates, the same as the shipped
 32x32 circuit.
 
+Data: upload `cats16_bits.bin` (188 KB, written by `gan/export_bits.py`) next
+to this notebook and there is no dataset download at all. Without it the script
+falls back to torchvision, which pulls CIFAR-10 (~170 MB).
+
 Run on Colab: Runtime -> T4 GPU -> Run all. About 30-45 minutes.
 """
 
 import json
 import os
+import struct
 import sys
 import time
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -48,20 +54,43 @@ SIDE = int(os.environ.get("SIDE", "16"))
 print("resolution", SIDE, "x", SIDE)
 
 # --- data ------------------------------------------------------------------
-tf = transforms.Compose([
-    transforms.Grayscale(),
-    transforms.Resize((SIDE, SIDE), interpolation=transforms.InterpolationMode.BOX),
-    transforms.ToTensor(),
-])
-train_set = datasets.CIFAR10(root="./cifar", train=True, download=True, transform=tf)
+# Upload cats16_bits.bin next to this notebook: 188 KB of pre-binarized cats,
+# the exact preprocessing the Rust trainer uses. Without it we fall back to
+# torchvision, which downloads CIFAR-10 (~170 MB) and is slow from a phone.
+BITS_FILE = os.environ.get("BITS", "cats16_bits.bin")
 
 
-def cats(dataset):
-    images = torch.stack([img for img, label in dataset if label == 3])  # class 3 = cat
-    return (images >= 128 / 255).float()  # (N, 1, H, W)
+def load_bits(path, side):
+    """Read the XAB1 bit pack written by gan/export_bits.py."""
+    with open(path, "rb") as handle:
+        if handle.read(4) != b"XAB1":
+            raise ValueError(f"{path}: not an XAB1 bit pack")
+        n, cols = struct.unpack("<II", handle.read(8))
+        if cols != side * side:
+            raise ValueError(f"{path}: {cols} bits per image, expected {side * side}")
+        row_bytes = (cols + 7) // 8
+        raw = np.frombuffer(handle.read(n * row_bytes), dtype=np.uint8).reshape(n, row_bytes)
+    return np.unpackbits(raw, axis=1)[:, :cols].reshape(n, 1, side, side)
 
 
-real = cats(train_set).to(device)
+if os.path.exists(BITS_FILE):
+    real = torch.tensor(load_bits(BITS_FILE, SIDE), dtype=torch.float32, device=device)
+    print(f"data: {BITS_FILE} ->", tuple(real.shape))
+else:
+    print("data: no", BITS_FILE, "-- falling back to the CIFAR-10 download")
+    tf = transforms.Compose([
+        transforms.Grayscale(),
+        transforms.Resize((SIDE, SIDE), interpolation=transforms.InterpolationMode.BOX),
+        transforms.ToTensor(),
+    ])
+    train_set = datasets.CIFAR10(root="./cifar", train=True, download=True, transform=tf)
+
+    def cats(dataset):
+        images = torch.stack([img for img, label in dataset if label == 3])  # class 3 = cat
+        return (images >= 128 / 255).float()  # (N, 1, H, W)
+
+    real = cats(train_set).to(device)
+
 DATA_DENSITY = real.mean().item()
 print("train", tuple(real.shape), "| data density", round(DATA_DENSITY, 3))
 

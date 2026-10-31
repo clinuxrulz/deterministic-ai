@@ -40,6 +40,15 @@ resolution and latent changed, everything else held fixed:
 SIDE=16 LATENT=32 HIDDEN=512,768,768 STEPS=150000   # 2,304 gates, 9 per pixel
 ```
 
+The notebook wants `cats16_bits.bin` (188 KB) uploaded beside it — 6,000
+pre-binarized cats in the `XAB1` format, i.e. the same preprocessing the Rust
+trainer uses. Without it, torchvision downloads CIFAR-10 (~170 MB), which is
+the slow part when working from a phone:
+
+```bash
+python gan/export_bits.py data/cats16_threshold.bin data/cats16_bits.bin
+```
+
 Why: the 32×32 generator already has more gates per pixel (2.25) than the
 decoder that works (0.97), so capacity was never the constraint — the latent
 budget was. 96 bits for 4,000 training cats is 2⁹⁶ outputs of which v2 used
@@ -131,6 +140,7 @@ cargo run --release -p xorae -- circuit-info --circuit /tmp/random_circuit.json
 | `png.py` | stdlib PNG writer for sample grids |
 | `export.py` | checkpoint → literal circuit JSON (argmax wiring) |
 | `binarygan16_v3.py` / `.ipynb` | the current run: 16×16, 32-bit latent, 2,304 gates, usage penalty + InfoGAN Q |
+| `export_bits.py` | XAE cache → 188 KB `XAB1` bit pack, so Colab uploads bits instead of downloading CIFAR-10 |
 
 ## Things that are easy to get wrong
 
