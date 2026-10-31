@@ -181,7 +181,7 @@ impl NandConfig {
         anyhow::ensure!(self.image_size > 0, "image_size must be > 0");
         anyhow::ensure!(self.key_bits > 0, "key_bits must be > 0");
         anyhow::ensure!(
-            self.key_bits < self.image_size * self.image_size,
+            self.key_bits < self.image_size * self.image_size * self.channels.max(1),
             "key must be smaller than the input"
         );
         anyhow::ensure!(!self.hidden.is_empty(), "hidden must not be empty");
