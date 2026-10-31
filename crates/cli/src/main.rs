@@ -38,6 +38,10 @@ enum CliCommand {
         out: PathBuf,
         #[arg(long, default_value_t = 16)]
         size: usize,
+        /// Binarization: `threshold`, `otsu`, `dither` or `edge`. `edge` keeps
+        /// the strongest 15% of Sobel gradients, which turns a photo into a
+        /// line drawing and stays legible at 32x32 where a hard threshold
+        /// collapses into blobs.
         #[arg(long, default_value = "dither")]
         binarize: String,
         #[arg(long, default_value_t = 3)]
@@ -119,6 +123,11 @@ enum CliCommand {
         /// Gate relaxation: product (default), min, or lukasiewicz.
         #[arg(long)]
         relaxation: Option<String>,
+        /// Weight on target bits that are 1 (default 1). Raise it for sparse
+        /// targets such as `--binarize edge`, where an all-zero output is
+        /// already 85% correct and the encoder collapses.
+        #[arg(long)]
+        positive_weight: Option<f32>,
     },
     /// Evaluate a saved model on train/val/test.
     Eval {
@@ -512,6 +521,7 @@ fn main() -> Result<()> {
             seed,
             epochs,
             gain_end,
+            positive_weight,
             train_limit,
             ste,
             wire_ste,
@@ -526,6 +536,9 @@ fn main() -> Result<()> {
             }
             if let Some(gain_end) = gain_end {
                 cfg.gain_end = gain_end;
+            }
+            if let Some(positive_weight) = positive_weight {
+                cfg.positive_weight = positive_weight;
             }
             if train_limit.is_some() {
                 cfg.train_limit = train_limit;
@@ -612,9 +625,11 @@ fn main() -> Result<()> {
                 );
             } else {
                 println!(
-                    "{}: BER {:.4}, exact {:.2}%, key entropy {:.3}, active gates {} / AIG nodes {} ({} samples)",
+                    "{}: BER {:.4}, ones F1 {:.3}, ones IoU {:.3}, exact {:.2}%, key entropy {:.3}, active gates {} / AIG nodes {} ({} samples)",
                     split,
                     report.ber,
+                    report.ones_f1,
+                    report.ones_iou,
                     report.exact_rate * 100.0,
                     report.key_entropy,
                     report.active_gates,
@@ -1161,7 +1176,8 @@ fn parse_binarize(value: &str) -> Result<BinarizeMode> {
         "threshold" => Ok(BinarizeMode::Threshold),
         "otsu" => Ok(BinarizeMode::Otsu),
         "dither" => Ok(BinarizeMode::Dither),
-        other => bail!("unknown binarize mode {other:?} (use threshold, otsu or dither)"),
+        "edge" => Ok(BinarizeMode::Edge),
+        other => bail!("unknown binarize mode {other:?} (use threshold, otsu, dither or edge)"),
     }
 }
 

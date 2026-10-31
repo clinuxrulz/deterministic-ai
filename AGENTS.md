@@ -234,7 +234,7 @@ cargo run --release -p xorae -- export \
 | Command | Purpose |
 |---|---|
 | `fetch-data` | Download/extract CIFAR-10 |
-| `preprocess` | Build a cached dataset (`XAE4`); `--binarize`, `--rgb1`, `--rgb2`, `--palette`, or `--mnist-dir` for raw IDX files |
+| `preprocess` | Build a cached dataset (`XAE4`); `--binarize {threshold,otsu,dither,edge}`, `--rgb1`, `--rgb2`, `--palette`, or `--mnist-dir` for raw IDX files |
 | `train` | Genetic algorithm (legacy track) |
 | `train-grad` | Gradient training of **gate types** on a fixed hierarchical wiring |
 | `train-nand` | **Current best**: NAND-only wiring search |
@@ -310,6 +310,7 @@ Do not spend time re-running these.
 | 300 epochs instead of 200 | 0.1674 vs 0.1679 on the same seed — far inside the ±0.013 single-run noise band. The default schedule has already converged by ~epoch 150 |
 | Hard activations + straight-through (`--ste`) | 0.3128 / 0.3270 / 0.3198 over seeds 0-2 vs 0.1730 baseline. At `gain = 1` every gate thresholds to 1 and the network starts saturated |
 | Hard wiring + straight-through (`--wire-ste`) | 0.2164 at seed 42 vs 0.1722. Trains the exported argmax circuit directly; plateaus by epoch ~75 |
+| Sobel edge targets (`--binarize edge`) | Legible line drawings, but this trainer cannot fit them: the best val epoch is epoch 0 (the random init), key entropy collapses 0.926 -> 0.291 and ones F1 is 0.198 vs 0.783 for threshold. Weighting positives 6x or 100x changes nothing that survives selection |
 | More data / augmentation as an accuracy fix | The model cannot fit 100 images (train BER 0.1741 after ~12,000 updates), so there is no overfitting gap to close |
 | Łukasiewicz gate relaxation | 0.2117 at seed 42 vs 0.1722. Nilpotent: zero gradient whenever `u + v <= 1` |
 | Gödel `min` as the default | Better at equal training budget (−0.0089 over 10 seeds) but much worse at equal size: pruned to 1,400 gates it scores 0.2154 vs 0.1811 for product (0/5 seeds win). Its extra gates are load-bearing |
@@ -388,7 +389,20 @@ Do not spend time re-running these.
   exact one; use `simplify` first.
 - **BER is a bad metric on sparse data.** On binarized MNIST (13.4% ones) the
   model scores 0.2254 while all-zero scores 0.1366, despite reconstructing
-  recognisable digits. Use IoU/F1 or balanced accuracy there.
+  recognisable digits. `eval` now also prints **ones F1** and **ones IoU**
+  (precision/recall over the set bits), which is what to compare when the
+  target is sparse. On the shipped 32x32 model they are 0.783 / 0.643.
+- **The 32x32 threshold target is an inkblot.** Rendering the binarized target
+  next to the 32x32 grayscale original makes it obvious that a *perfect* model
+  would still output blobs, so "does it look like a cat" cannot be the measure
+  for that representation. The 4-level palette (`--palette 4 --size 32`,
+  2,048 bits, `channels = 2`) keeps the targets recognisable; see
+  `configs/cats32_pal4.toml`.
+- `--palette` used to panic for any dataset with more than one image
+  (`from_color_parts` called `rgb_to_gray` on the whole buffer); fixed.
+- `train-nand --positive-weight W` weights target 1-bits W times in the loss
+  (default 1). It is necessary in principle for sparse targets, but on edge
+  maps it did not rescue the run on its own.
 - MNIST is fetched separately: `./scripts/fetch_mnist.sh data/mnist`, then
   `preprocess --mnist-dir ... --limit N`.
 - **Memory is tight on the phone.** The full 28×28 MNIST dataset is 270 MB on

@@ -42,6 +42,7 @@ fn parse_mode(mode: &str) -> Result<BinarizeMode, String> {
         "threshold" => Ok(BinarizeMode::Threshold),
         "otsu" => Ok(BinarizeMode::Otsu),
         "dither" => Ok(BinarizeMode::Dither),
+        "edge" => Ok(BinarizeMode::Edge),
         other => Err(format!("unknown binarize mode: {other}")),
     }
 }
@@ -51,6 +52,7 @@ fn mode_name(mode: BinarizeMode) -> &'static str {
         BinarizeMode::Threshold => "threshold",
         BinarizeMode::Otsu => "otsu",
         BinarizeMode::Dither => "dither",
+        BinarizeMode::Edge => "edge",
     }
 }
 

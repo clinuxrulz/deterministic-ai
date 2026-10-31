@@ -75,6 +75,11 @@ pub struct NandConfig {
     /// Weight of the `a(1-a)` penalty that pushes activations toward 0/1.
     #[serde(default = "default_binarize_weight")]
     pub binarize_weight: f32,
+    /// Weight on target bits that are 1, relative to 0. Sparse targets (an
+    /// edge map is 15% ones) otherwise collapse to an all-zero reconstruction
+    /// and a constant key: predicting "nothing" is already 85% correct.
+    #[serde(default = "default_positive_weight")]
+    pub positive_weight: f32,
     /// Pulls each key bit toward a 50/50 split over the batch.
     #[serde(default = "default_key_balance")]
     pub key_balance_weight: f32,
@@ -130,6 +135,10 @@ fn default_n_global() -> usize {
 fn default_skip_prob() -> f32 {
     0.30
 }
+fn default_positive_weight() -> f32 {
+    1.0
+}
+
 fn default_binarize_weight() -> f32 {
     0.05
 }
@@ -418,6 +427,7 @@ struct Work {
     /// Per-key-bit activation sums over this worker's samples.
     key_sum: Vec<f32>,
     binarize_weight: f32,
+    positive_weight: f32,
     key_balance_weight: f32,
     ste: bool,
     wire_ste: bool,
@@ -454,6 +464,7 @@ impl Work {
             loss: 0.0,
             key_sum: vec![0.0; net.key_bits],
             binarize_weight: 0.0,
+            positive_weight: 1.0,
             key_balance_weight: 0.0,
             ste: false,
             wire_ste: false,
@@ -552,7 +563,12 @@ impl Work {
                     z[o + s]
                 };
                 let d = out - target[o + s];
-                total += d * d;
+                let weight = if target[o + s] > 0.5 {
+                    self.positive_weight
+                } else {
+                    1.0
+                };
+                total += weight * d * d;
             }
         }
         let mut total = total / n_global;
@@ -618,7 +634,12 @@ impl Work {
                     } else {
                         z[o + s]
                     };
-                    dz[o + s] += scale * (out - target[o + s]);
+                    let weight = if target[o + s] > 0.5 {
+                        self.positive_weight
+                    } else {
+                        1.0
+                    };
+                    dz[o + s] += scale * weight * (out - target[o + s]);
                 }
             }
         }
@@ -1224,10 +1245,13 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
     if cols != expected {
         bail!("dataset has {cols} bits/image, config expects {expected}");
     }
-    if dataset.channels != cfg.channels.max(1) {
+    // `channels` in the config counts bit planes, which is the colour channel
+    // count for grayscale/rgb1/rgb2 but `bits_per_pixel` for a palette (a
+    // 4-colour image is two planes of a single channel).
+    let planes = dataset.channels * dataset.bits_per_pixel;
+    if planes != cfg.channels.max(1) {
         bail!(
-            "dataset has {} channel(s), config says {}",
-            dataset.channels,
+            "dataset has {planes} bit plane(s), config says {}",
             cfg.channels
         );
     }
@@ -1275,6 +1299,7 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
             if s1 > s0 {
                 let mut w = Work::new(&trainer.net, cfg.batch, s0, s1);
                 w.binarize_weight = cfg.binarize_weight;
+                w.positive_weight = cfg.positive_weight;
                 w.key_balance_weight = cfg.key_balance_weight;
                 w.ste = cfg.ste;
                 w.wire_ste = cfg.wire_ste;
@@ -1542,6 +1567,7 @@ mod tests {
             n_global: 2,
             skip_prob: 0.3,
             binarize_weight: 0.0,
+            positive_weight: 1.0,
             key_balance_weight: 0.0,
             gain_start: 1.0,
             gain_end: 32.0,

@@ -1,0 +1,49 @@
+# NAND-only circuit. Every gate is identical; the ONLY learned quantity is
+# which two wires each gate reads. This is the minimal search space.
+#
+# 32x32, 4 colours (2 bit planes) -> 16x32 -> 16x16 -> 8x16 (256-bit key).
+image_size = 32
+# Four-level grayscale palette: 2 bit planes per pixel, so the input is
+# 2,048 bits. `channels` counts bit planes here, exactly as rgb2 uses 6.
+channels = 2
+key_bits = 256
+hidden = [1024, 512]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+# Candidate wires per gate: 9 from the local window, 3 long-range.
+n_local = 9
+n_global = 3
+# 30% of long-range candidates come from an earlier layer (skip connection).
+skip_prob = 0.30
+
+# Soft penalty pulling activations to 0/1 so the exported NAND circuit matches.
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+# Anneal the candidate softmax from soft to one-hot.
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+# Greedy hill-climb over the wire list after training, scoring each candidate
+# swap on a fixed sample of training rows.
+polish_sweeps = 2
+polish_samples = 512
+
+# Gate relaxation. `product` (1 - a*b) is the default: it is slightly worse at
+# equal *training* budget than Gödel `min` (0.1730 vs 0.1641 over 10 seeds) but
+# much better at equal *exported size*, which is what this project optimises.
+# On the size-BER frontier (5 seeds, lossy pruning to a fixed gate count):
+#   1,400 gates: product 0.1811 +- 0.0057 vs min 0.2154 +- 0.0167
+#   1,300 gates: product 0.1882 +- 0.0157 vs min 0.2401 +- 0.0151
+# Gödel keeps 77% of gates as real two-input logic instead of 65%, but those
+# extra gates are load-bearing, so it degrades much faster when compressed.
+# See docs/experiment.md, Checkpoints 6 and 7.
+relaxation = "product"
+
+seed = 42
+log_every = 10
+val_every = 25

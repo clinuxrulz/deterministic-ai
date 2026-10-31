@@ -12,6 +12,10 @@ pub enum BinarizeMode {
     Otsu,
     /// Floyd–Steinberg error diffusion. Preserves more visual detail.
     Dither,
+    /// Sobel edges, keeping the strongest `EDGE_DENSITY` fraction of pixels.
+    /// A floor plan rather than a photo: a hard threshold at 32x32 turns a cat
+    /// into an inkblot, while its outline stays legible as a line drawing.
+    Edge,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -129,7 +133,60 @@ pub fn binarize(gray: &[u8], mode: BinarizeMode, threshold: u8) -> Vec<u8> {
         BinarizeMode::Threshold => binarize_threshold(gray, threshold),
         BinarizeMode::Otsu => binarize_threshold(gray, otsu_threshold(gray)),
         BinarizeMode::Dither => binarize_dither(gray, threshold),
+        BinarizeMode::Edge => binarize_edge(gray),
     }
+}
+
+/// Fraction of pixels `BinarizeMode::Edge` keeps. A constant density means the
+/// all-zero baseline is the same for every image, so errors stay comparable.
+pub const EDGE_DENSITY: f64 = 0.15;
+
+/// Sobel gradient magnitude, thresholded at a per-image percentile.
+///
+/// The percentile rather than an absolute threshold is deliberate: CIFAR cats
+/// vary from a black cat in a dark room to a white cat on a bed, and a fixed
+/// cutoff either erases the first or saturates the second. Non-maximum
+/// suppression was tried and rejected -- at 32x32 it thins the strokes into
+/// broken dashes, which read worse than continuous 2 px lines.
+pub fn binarize_edge(gray: &[u8]) -> Vec<u8> {
+    let n = gray.len();
+    let side = (n as f64).sqrt().round() as usize;
+    if side * side != n || side < 3 {
+        return binarize_threshold(gray, 128);
+    }
+    let mut mag = vec![0u32; n];
+    for y in 1..side - 1 {
+        for x in 1..side - 1 {
+            let p = |yy: usize, xx: usize| gray[yy * side + xx] as i32;
+            let gx = -p(y - 1, x - 1) + p(y - 1, x + 1) - 2 * p(y, x - 1) + 2 * p(y, x + 1)
+                - p(y + 1, x - 1)
+                + p(y + 1, x + 1);
+            let gy = -p(y - 1, x - 1) - 2 * p(y - 1, x) - p(y - 1, x + 1)
+                + p(y + 1, x - 1)
+                + 2 * p(y + 1, x)
+                + p(y + 1, x + 1);
+            // Squared magnitude is monotone, so the ranking is unchanged and we
+            // skip the square root.
+            mag[y * side + x] = (gx * gx + gy * gy) as u32;
+        }
+    }
+    // Rank pixels instead of thresholding at a magnitude: many CIFAR images
+    // have large flat regions, so a cutoff ties across thousands of pixels and
+    // the density would swing with the content. Ties break on index, which
+    // keeps the result deterministic.
+    let keep = (((n as f64) * EDGE_DENSITY).round() as usize).clamp(1, n);
+    let mut order: Vec<usize> = (0..n).collect();
+    if mag.iter().all(|&m| m == 0) {
+        return vec![0u8; n];
+    }
+    order.sort_by(|&i, &j| mag[j].cmp(&mag[i]).then(i.cmp(&j)));
+    let mut out = vec![0u8; n];
+    for &i in &order[..keep] {
+        if mag[i] > 0 {
+            out[i] = 1;
+        }
+    }
+    out
 }
 
 fn binarize_threshold(gray: &[u8], threshold: u8) -> Vec<u8> {
@@ -349,6 +406,42 @@ mod tests {
         let small = resize_box(&gray, 32, 32, 16);
         assert_eq!(small.len(), 256);
         assert!(small.iter().all(|&v| v == 200));
+    }
+
+    #[test]
+    fn edge_keeps_only_the_step() {
+        // Left half black, right half white: the seam is the only gradient.
+        let mut gray = vec![0u8; 32 * 32];
+        for row in gray.chunks_mut(32) {
+            for px in row.iter_mut().skip(16) {
+                *px = 255;
+            }
+        }
+        let bits = binarize(&gray, BinarizeMode::Edge, 128);
+        assert_eq!(bits.len(), 1024);
+        let ones: Vec<usize> = (0..bits.len()).filter(|&i| bits[i] == 1).collect();
+        assert!(!ones.is_empty(), "step edge produced no bits");
+        for i in ones {
+            let x = i % 32;
+            assert!(x == 15 || x == 16, "edge bit at x={x}");
+        }
+    }
+
+    #[test]
+    fn edge_is_empty_on_a_flat_image() {
+        let bits = binarize(&vec![128u8; 32 * 32], BinarizeMode::Edge, 128);
+        assert!(bits.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn edge_density_is_constant() {
+        // A ramp has one gradient direction everywhere, so every interior
+        // pixel ties; ranking must still keep exactly the requested count.
+        let gray: Vec<u8> = (0..32 * 32).map(|i| ((i % 32) * 8) as u8).collect();
+        let bits = binarize(&gray, BinarizeMode::Edge, 128);
+        let ones = bits.iter().filter(|&&b| b == 1).count();
+        let expected = (1024.0 * EDGE_DENSITY).round() as usize;
+        assert_eq!(ones, expected, "density drifted");
     }
 
     #[test]

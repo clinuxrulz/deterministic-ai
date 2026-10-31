@@ -42,6 +42,11 @@ pub struct EvalReport {
     pub key_uniqueness: f32,
     pub active_gates: usize,
     pub exact_rate: f32,
+    /// F1 and IoU over the *set* bits. On a sparse target BER is dominated by
+    /// the zeros -- at 15% density an all-zero image scores BER 0.85 -- so
+    /// these judge the strokes instead of the empty space.
+    pub ones_f1: f32,
+    pub ones_iou: f32,
     pub n: usize,
 }
 
@@ -132,9 +137,12 @@ fn report_from_planes(
     let uniqueness = key_uniqueness(key_planes, cfg.key_bits, batch.words, batch.len);
     let fitness =
         ber + cfg.entropy_weight * (1.0 - entropy) + cfg.uniqueness_weight * (1.0 - uniqueness);
+    let (ones_f1, ones_iou) = ones_scores(recon, batch);
     EvalReport {
         fitness,
         ber,
+        ones_f1,
+        ones_iou,
         ..Default::default()
     }
     .with_common(entropy, uniqueness, batch.len)
@@ -156,9 +164,12 @@ fn report_from_planes_color(
     let fitness = color_mae
         + cfg.entropy_weight * (1.0 - entropy)
         + cfg.uniqueness_weight * (1.0 - uniqueness);
+    let (ones_f1, ones_iou) = ones_scores(recon, batch);
     EvalReport {
         fitness,
         ber,
+        ones_f1,
+        ones_iou,
         color_mae,
         color_mse,
         psnr,
@@ -846,9 +857,12 @@ pub fn evaluate_model(model: &Model, dataset: &Dataset, indices: &[usize]) -> Re
         color_mae
     };
 
+    let (ones_f1, ones_iou) = ones_scores(&recon, &batch);
     Ok(EvalReport {
         fitness,
         ber,
+        ones_f1,
+        ones_iou,
         color_mae,
         color_mse,
         psnr,
@@ -860,6 +874,42 @@ pub fn evaluate_model(model: &Model, dataset: &Dataset, indices: &[usize]) -> Re
         exact_rate: exact as f32 / batch.len as f32,
         n: batch.len,
     })
+}
+
+/// Precision/recall over the set bits, as F1 and IoU.
+fn ones_scores(recon: &[u64], batch: &BitBatch) -> (f32, f32) {
+    let mut tp = 0u64;
+    let mut fp = 0u64;
+    let mut missed = 0u64;
+    for sample in 0..batch.len {
+        let word = sample / 64;
+        let bit = sample % 64;
+        for col in 0..batch.cols {
+            let a = (recon[col * batch.words + word] >> bit) & 1;
+            let b = (batch.planes[col * batch.words + word] >> bit) & 1;
+            match (a, b) {
+                (1, 1) => tp += 1,
+                (1, 0) => fp += 1,
+                (0, 1) => missed += 1,
+                _ => {}
+            }
+        }
+    }
+    if tp == 0 && fp == 0 && missed == 0 {
+        return (1.0, 1.0);
+    }
+    let f1 = if tp == 0 {
+        0.0
+    } else {
+        2.0 * tp as f32 / (2 * tp + fp + missed) as f32
+    };
+    let union = tp + fp + missed;
+    let iou = if union == 0 {
+        1.0
+    } else {
+        tp as f32 / union as f32
+    };
+    (f1, iou)
 }
 
 fn exact_matches(recon: &[u64], batch: &BitBatch) -> usize {

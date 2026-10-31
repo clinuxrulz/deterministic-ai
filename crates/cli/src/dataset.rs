@@ -150,7 +150,13 @@ impl Dataset {
         assert_eq!(rgb.len(), n * pixels * 3);
         assert_eq!(values.len(), n * pixels);
         assert_eq!(is_test.len(), n);
-        let gray = rgb_to_gray(size, size, &rgb);
+        // Per row: the buffer holds every image back to back, so a single
+        // rgb_to_gray call would trip its length assertion for n > 1.
+        let mut gray = Vec::with_capacity(n * pixels);
+        for row in 0..n {
+            let image = &rgb[row * pixels * 3..(row + 1) * pixels * 3];
+            gray.extend_from_slice(&rgb_to_gray(size, size, image));
+        }
         let bits_per_pixel = palette.len().ilog2() as usize;
 
         Self {
