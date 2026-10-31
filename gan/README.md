@@ -19,12 +19,39 @@ The single-file script takes environment variables, so 32×32 needs no edits:
 ```
 
 Generator gates are `sum(hidden) + side²` (16×16: 1,024; 32×32: 2,560+).
-16×16 is near the substrate's limit — even the supervised Rust autoencoders
-only reach BER 0.39 there against a 0.457 all-zero baseline, versus 0.17 at
-32×32.
+
+Beware the resolution trap: the old note here said 16×16 was "near the
+substrate's limit" because the supervised Rust autoencoders only reached BER
+0.39 there. That number was measured against the **dithered** 16×16 cache,
+whose target is a noise pattern (all-zero already scores 0.457). Against a
+threshold cache the same 16×16 model scores **BER 0.2285**, ones F1 0.712 and
+edge F1@1.5 0.835 vs a 0.719 chance baseline with 283 active gates. Dither is
+an impossible target at this size; the resolution is not the problem.
 
 `gan/render_circuit.py` renders samples from an exported circuit on the phone
 (stdlib only): `python gan/render_circuit.py circuit.json out.png 32`.
+
+## v3 at 16×16 (the run that tests the rate argument)
+
+`binarygan16_v3.py` / `binarygan16_v3.ipynb` are `binarygan32_v3.py` with the
+resolution and latent changed, everything else held fixed:
+
+```bash
+SIDE=16 LATENT=32 HIDDEN=512,768,768 STEPS=150000   # 2,304 gates, 9 per pixel
+```
+
+Why: the 32×32 generator already has more gates per pixel (2.25) than the
+decoder that works (0.97), so capacity was never the constraint — the latent
+budget was. 96 bits for 4,000 training cats is 2⁹⁶ outputs of which v2 used
+15. At 16×16 the same 2,304 gates buy 9 per pixel and 32 latent bits (8×
+compression, the rate the autoencoder is known to support), so there are 2³²
+outputs to police.
+
+The notebook prints the same battery the v2 post-mortem used — density, lag-1
+texture, mean-image correlation, saturated fraction, output cone and the
+per-bit flip test — so the two runs compare directly. Watch `latent N/32`
+(v2: 15/96), `q` (0.693 = the latent carries no information) and mean-image
+correlation (v2: 0.254).
 
 ## Why not on the phone
 
@@ -103,6 +130,7 @@ cargo run --release -p xorae -- circuit-info --circuit /tmp/random_circuit.json
 | `train.py` | hinge-loss GAN loop, gain anneal, sample grids, checkpoints |
 | `png.py` | stdlib PNG writer for sample grids |
 | `export.py` | checkpoint → literal circuit JSON (argmax wiring) |
+| `binarygan16_v3.py` / `.ipynb` | the current run: 16×16, 32-bit latent, 2,304 gates, usage penalty + InfoGAN Q |
 
 ## Things that are easy to get wrong
 
