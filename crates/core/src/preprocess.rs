@@ -330,6 +330,32 @@ pub fn rgba_to_bits_rgb2(width: usize, height: usize, rgba: &[u8], size: usize) 
     bits
 }
 
+/// Number of bit planes in an RGB-8 image: eight per channel.
+pub const RGB8_PLANES: usize = 24;
+
+/// RGB 8-bit/channel encoded as twenty-four channel-major bit planes.
+///
+/// Plane order is `R7..R0, G7..G0, B7..B0`, each `size × size`, with the most
+/// significant bit first. This is the unquantised target: the bits rebuild the
+/// resized image exactly, so a perfect model scores zero absolute MAE.
+pub fn rgba_to_bits_rgb8(width: usize, height: usize, rgba: &[u8], size: usize) -> Vec<u8> {
+    let rgb = rgba_to_rgb(width, height, rgba);
+    let small = resize_rgb_box(&rgb, width, height, size);
+    let pixels = size * size;
+    let mut bits = vec![0u8; pixels * RGB8_PLANES];
+    for channel in 0..3 {
+        for bit in 0..8 {
+            let plane = channel * 8 + bit;
+            let shift = 7 - bit;
+            let base = plane * pixels;
+            for p in 0..pixels {
+                bits[base + p] = (small[p * 3 + channel] >> shift) & 1;
+            }
+        }
+    }
+    bits
+}
+
 /// Palette indices encoded as `bits_per_pixel` bits per pixel.
 pub fn rgba_to_bits_palette(
     width: usize,
@@ -529,5 +555,19 @@ mod tests {
         assert!(bits[8..12].iter().all(|&b| b == 1), "G_hi");
         assert!(bits[12..16].iter().all(|&b| b == 0), "G_lo");
         assert!(bits[16..24].iter().all(|&b| b == 0), "B_hi/B_lo");
+    }
+
+    #[test]
+    fn rgb8_planes_are_channel_major_msb_first() {
+        // 2x2 with R=0b1010_0101, G=0, B=0.
+        let rgba = [0b1010_0101u8, 0, 0, 255].repeat(4);
+        let bits = rgba_to_bits_rgb8(2, 2, &rgba, 2);
+        assert_eq!(bits.len(), 4 * RGB8_PLANES);
+        let planes: Vec<&[u8]> = bits.chunks_exact(4).collect();
+        let expected = [1, 0, 1, 0, 0, 1, 0, 1];
+        for (bit, want) in expected.iter().enumerate() {
+            assert!(planes[bit].iter().all(|&b| b == *want), "R bit {bit}");
+        }
+        assert!(bits[8 * 4..].iter().all(|&b| b == 0), "G/B planes");
     }
 }

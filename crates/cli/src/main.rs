@@ -57,6 +57,9 @@ enum CliCommand {
         /// Build a 3-channel 2-bit RGB dataset (64 colors).
         #[arg(long)]
         rgb2: bool,
+        /// Build a 3-channel 8-bit RGB dataset: 24 planes, no quantisation.
+        #[arg(long)]
+        rgb8: bool,
         /// Build from raw MNIST IDX files in this directory instead of CIFAR.
         #[arg(long)]
         mnist_dir: Option<PathBuf>,
@@ -343,6 +346,7 @@ fn main() -> Result<()> {
             palette,
             rgb1,
             rgb2,
+            rgb8,
             mnist_dir,
             limit,
             seed,
@@ -378,6 +382,21 @@ fn main() -> Result<()> {
                     size,
                     dataset.palette.len(),
                     dataset.bits_per_pixel,
+                    train.len(),
+                    val.len(),
+                    test.len()
+                );
+            } else if rgb8 {
+                let dataset = dataset::load_cifar10_rgb8(&cifar_dir, class, size)?;
+                dataset.save(&out)?;
+                let (train, val, test) = dataset.split_indices(seed);
+                println!(
+                    "wrote {} ({} images, {}x{}, RGB 8-bit/channel (24 planes), {} bits/pixel; {} train / {} val / {} test)",
+                    out.display(),
+                    dataset.n,
+                    size,
+                    size,
+                    dataset.channels,
                     train.len(),
                     val.len(),
                     test.len()

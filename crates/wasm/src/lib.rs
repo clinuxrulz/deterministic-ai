@@ -6,8 +6,8 @@
 
 use wasm_bindgen::prelude::*;
 use xorae_core::preprocess::{
-    rgba_to_bits, rgba_to_bits_palette, rgba_to_bits_rgb1, rgba_to_bits_rgb2, BinarizeMode,
-    PreprocessOptions,
+    rgba_to_bits, rgba_to_bits_palette, rgba_to_bits_rgb1, rgba_to_bits_rgb2, rgba_to_bits_rgb8,
+    BinarizeMode, PreprocessOptions,
 };
 use xorae_core::{Circuit, ColorMode, Model};
 
@@ -131,6 +131,12 @@ impl ModelHandle {
                 rgba,
                 self.inner.config.image_size,
             )),
+            ColorMode::Rgb8 => Ok(rgba_to_bits_rgb8(
+                width,
+                height,
+                rgba,
+                self.inner.config.image_size,
+            )),
         }
     }
 
@@ -141,6 +147,7 @@ impl ModelHandle {
             ColorMode::Palette => "palette",
             ColorMode::Rgb1 => "rgb1",
             ColorMode::Rgb2 => "rgb2",
+            ColorMode::Rgb8 => "rgb8",
         }
         .to_string()
     }

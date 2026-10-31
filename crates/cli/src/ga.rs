@@ -122,7 +122,7 @@ pub fn evaluate(
     match dataset.color_mode {
         ColorMode::Grayscale => report_from_planes(&recon, &key_planes, batch, cfg),
         ColorMode::Palette => report_from_planes_color(&recon, &key_planes, batch, cfg, dataset),
-        ColorMode::Rgb1 | ColorMode::Rgb2 => {
+        ColorMode::Rgb1 | ColorMode::Rgb2 | ColorMode::Rgb8 => {
             // For RGB bit-plane models the bit error and the colour error are
             // the same quantity. Use the fast bit-parallel path during
             // evolution; pixel accuracy and level-aware metrics are computed at
@@ -336,6 +336,62 @@ fn rgb2_metrics(recon: &[u64], batch: &BitBatch, dataset: &Dataset) -> (f32, f32
     let fields = (batch.len.max(1) * pixels.max(1) * 3).max(1) as f64;
     let color_mae = (level_err as f64 / fields / 3.0) as f32;
     let color_mse = (level_sq as f64 / fields / 9.0) as f32;
+    let index_accuracy = correct_pixels as f32 / (batch.len.max(1) * pixels.max(1)) as f32;
+    (
+        color_mae,
+        color_mse,
+        psnr_from_mse(color_mse),
+        index_accuracy,
+        exact_images,
+    )
+}
+
+/// Compute colour metrics for RGB-8 models by rebuilding each channel's byte
+/// from its eight bit planes and comparing it with the target byte.
+///
+/// Unlike rgb2 this is exact 8-bit colour, so `color_mae` and the absolute MAE
+/// against the original agree. Pixel accuracy requires all twenty-four planes
+/// to match.
+fn rgb8_metrics(recon: &[u64], batch: &BitBatch, dataset: &Dataset) -> (f32, f32, f32, f32, usize) {
+    let pixels = dataset.pixels();
+    let mut correct_pixels = 0usize;
+    let mut exact_images = 0usize;
+    let mut abs_err = 0u64;
+    let mut sq_err = 0u64;
+    for sample in 0..batch.len {
+        let word = sample / 64;
+        let bit = sample % 64;
+        let mut image_correct = 0usize;
+        for p in 0..pixels {
+            let mut pixel_ok = true;
+            for channel in 0..3 {
+                let mut a = 0u8;
+                let mut b = 0u8;
+                for plane_bit in 0..8 {
+                    let col = (channel * 8 + plane_bit) * pixels + p;
+                    let weight = 1u8 << (7 - plane_bit);
+                    a |= (((recon[col * batch.words + word] >> bit) & 1) as u8) * weight;
+                    b |= (((batch.planes[col * batch.words + word] >> bit) & 1) as u8) * weight;
+                }
+                let d = a.abs_diff(b) as u64;
+                abs_err += d;
+                sq_err += d * d;
+                if a != b {
+                    pixel_ok = false;
+                }
+            }
+            if pixel_ok {
+                correct_pixels += 1;
+                image_correct += 1;
+            }
+        }
+        if image_correct == pixels {
+            exact_images += 1;
+        }
+    }
+    let fields = (batch.len.max(1) * pixels.max(1) * 3).max(1) as f64;
+    let color_mae = (abs_err as f64 / fields / 255.0) as f32;
+    let color_mse = (sq_err as f64 / fields / (255.0 * 255.0)) as f32;
     let index_accuracy = correct_pixels as f32 / (batch.len.max(1) * pixels.max(1)) as f32;
     (
         color_mae,
@@ -866,6 +922,10 @@ pub fn evaluate_model(model: &Model, dataset: &Dataset, indices: &[usize]) -> Re
         }
         ColorMode::Rgb2 => {
             let (mae, mse, psnr, accuracy, _) = rgb2_metrics(&recon, &batch, dataset);
+            (mae, mse, psnr, accuracy)
+        }
+        ColorMode::Rgb8 => {
+            let (mae, mse, psnr, accuracy, _) = rgb8_metrics(&recon, &batch, dataset);
             (mae, mse, psnr, accuracy)
         }
         ColorMode::Grayscale => (0.0, 0.0, 0.0, 0.0),

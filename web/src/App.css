@@ -296,6 +296,12 @@ button:focus,
   gap: 6px;
 }
 
+.keyactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .keybit {
   width: 34px;
   height: 34px;

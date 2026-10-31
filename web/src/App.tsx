@@ -251,6 +251,33 @@ export default function App() {
     }
   }
 
+  function rerunKey(next: Uint8Array) {
+    const current = model();
+    if (!current) return;
+    setKeyBits(next);
+    if (current.color_mode === "grayscale") {
+      setRecon(current.decode_key(next));
+    } else {
+      setReconRgb(current.decode_rgb(next));
+    }
+  }
+
+  function flipRandomKey() {
+    const bits = keyBits();
+    if (bits.length === 0) return;
+    const next = new Uint8Array(bits);
+    next[Math.floor(Math.random() * bits.length)] ^= 1;
+    rerunKey(next);
+  }
+
+  function randomiseKey() {
+    const bits = keyBits();
+    if (bits.length === 0) return;
+    const next = new Uint8Array(bits);
+    for (let i = 0; i < next.length; i += 1) next[i] = Math.random() < 0.5 ? 1 : 0;
+    rerunKey(next);
+  }
+
   onSettled(() => {
     void (async () => {
       try {
@@ -403,20 +430,40 @@ export default function App() {
         <article class="panel">
           <h2>key</h2>
           <p class="keyhex">{keyHex()}</p>
-          <p class="hint">Click a bit to flip it and re-run the decoder.</p>
-          <div class="keygrid">
-            <Repeat count={keyBits().length}>
-              {(index) => (
-                <button
-                  class={keyBits()[index] === 1 ? "keybit on" : "keybit off"}
-                  title={`toggle key bit ${index}`}
-                  onClick={() => toggleKey(index)}
-                >
-                  {index}
-                </button>
-              )}
-            </Repeat>
-          </div>
+          <Show
+            when={keyBits().length <= 256}
+            fallback={
+              <>
+                <p class="hint">
+                  This key is too long to toggle bit by bit. Flip one at random, or sample a
+                  fresh key.
+                </p>
+                <div class="keyactions">
+                  <button class="sample" onClick={flipRandomKey}>
+                    flip a random bit
+                  </button>
+                  <button class="sample" onClick={randomiseKey}>
+                    randomise key
+                  </button>
+                </div>
+              </>
+            }
+          >
+            <p class="hint">Click a bit to flip it and re-run the decoder.</p>
+            <div class="keygrid">
+              <Repeat count={keyBits().length}>
+                {(index) => (
+                  <button
+                    class={keyBits()[index] === 1 ? "keybit on" : "keybit off"}
+                    title={`toggle key bit ${index}`}
+                    onClick={() => toggleKey(index)}
+                  >
+                    {index}
+                  </button>
+                )}
+              </Repeat>
+            </div>
+          </Show>
         </article>
 
         <article class="panel">

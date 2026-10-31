@@ -15,6 +15,9 @@ pub enum ColorMode {
     /// Six binary planes: two bits per channel (`R_hi, R_lo, G_hi, G_lo,
     /// B_hi, B_lo`). Four levels per channel, so 64 colours per pixel.
     Rgb2,
+    /// Twenty-four binary planes: eight bits per channel, most significant
+    /// bit first (`R7..R0, G7..G0, B7..B0`). Full 8-bit RGB, no quantisation.
+    Rgb8,
 }
 
 pub type Rgb = [u8; 3];

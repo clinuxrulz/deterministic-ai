@@ -1,0 +1,37 @@
+# Full 8-bit RGB: 16x16 pixels, 24 bit planes (R7..R0, G7..G0, B7..B0),
+# 6,144 input bits, 768-bit key (8x compression as usual).
+#
+# 16x16x24 -> 8x16x24 -> 4x16x24 -> 2x16x24 -> key 768
+# hidden [3072, 1536]; 2*(3072+1536) + 6144 + 768 = 16,128 NAND gates.
+#
+# This is the cheap capacity probe for 24-bit colour: one quarter of the
+# 32x32 gate count. The target is unquantised, so a perfect model scores
+# abs MAE 0 and every point of error is the model's.
+image_size = 16
+channels = 24
+key_bits = 768
+hidden = [3072, 1536]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+polish_sweeps = 2
+polish_samples = 512
+
+relaxation = "product"
+
+seed = 42
+log_every = 10
+val_every = 25
