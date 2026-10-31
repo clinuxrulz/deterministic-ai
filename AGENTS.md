@@ -281,8 +281,8 @@ cargo run --release -p xorae -- export \
   (Gödel) and `lukasiewicz` selectable via `--relaxation`. Gödel gives better
   BER at equal training budget but a worse size-accuracy trade; Łukasiewicz
   fails outright.
-- Each gate gets `n_local + n_global` **candidate wires** (default 9 local +
-  3 long-range across layers).
+- Each gate gets `n_local + n_global + n_channel` **candidate wires** (default
+  9 local + 3 long-range across layers + 0 cross-plane).
 - Two softmax distributions per gate (`alpha`, `beta`) select its two NAND
   inputs; the temperature anneals `gain_start → gain_end` so the selection
   becomes one-hot and export is literal `NAND(a, b)`.
@@ -298,6 +298,28 @@ cargo run --release -p xorae -- export \
   epochs and restored before polish/export. Selection is on val only, so test
   stays clean; at `gain_end = 32` this recovers ~0.002 val that the anneal
   otherwise overshoots.
+
+### What the wiring can and cannot express
+
+Two consequences of the fixed wiring that bound what any config can learn
+(asserted in `halving_layers_never_leave_their_column_or_plane`):
+
+- **Dependency is capped at `2^d` input bits**, where `d` is the total number of
+  gate levels from input to output (a gate's dependency set is the union of its
+  two inputs'). The shipped 32×32 model has `d = 6`, so one output bit sees at
+  most **64 of 1,024** input bits; 16×16 rgb8 (`d = 6`) sees 64 of 6,144; the
+  4×4 probes (`d = 4`) see 16 of 384. More depth is the only way to widen it,
+  and only same-resolution layers add depth without shrinking the shape.
+- **For planar colour, halving layers never leave a column or a plane.** The
+  shape starts tall (`channels·side` rows by `side` columns), so
+  `derive_shapes_from` only ever halves the row axis and `window` spans `sy`
+  rows by **one** column. Every local candidate then sits in the same column
+  and the same colour plane: the encoder is a stack of independent per-plane
+  column codecs. Only the random `n_global` picks and `n_channel` cross-plane
+  candidates mix them, and `n_channel = 6` moved 4×4 by nothing. Same-resolution
+  layers (3×3 window) are the only mechanism that reads across columns.
+  Grayscale 32×32 is different: its shape is square, so the halving alternates
+  rows and columns and layer 2 does read two columns.
 
 ## What has been ruled out (with evidence)
 
@@ -324,6 +346,8 @@ Do not spend time re-running these.
 | More data / augmentation as an accuracy fix | The model cannot fit 100 images (train BER 0.1741 after ~12,000 updates), so there is no overfitting gap to close |
 | Łukasiewicz gate relaxation | 0.2117 at seed 42 vs 0.1722. Nilpotent: zero gradient whenever `u + v <= 1` |
 | Gödel `min` as the default | Better at equal training budget (−0.0089 over 10 seeds) but much worse at equal size: pruned to 1,400 gates it scores 0.2154 vs 0.1811 for product (0/5 seeds win). Its extra gates are load-bearing |
+| **24-bit RGB (`--rgb8`)** | 16×16: abs MAE **0.2120** vs mean image 0.2031 (16,128 gates). 4×4: **0.2382** vs 0.1665 (1,008 gates). Cannot memorise 100 images either (train BER 0.3839 at 16×16 after ~18,700 updates, vs 0.1741 for grayscale). Half the planes are noise — see Checkpoint 11 |
+| 4×4 with more rate / mixing / depth | Key 48→96→192: abs MAE 0.2411 / **0.2325** (BER falls 0.4425→0.4110, but the gain is entirely in the noise planes). Cross-plane candidates: 0.2396. Same-resolution layers (8 levels instead of 4): 0.2764, and the same memorisation number (0.4130). Nothing approaches the 0.1665 bar |
 
 ## Open threads, in priority order
 
@@ -351,11 +375,19 @@ Do not spend time re-running these.
    free inversions (42% of gates are `Nand(x,x)`), spatial weight sharing, and
    distillation from a CNN teacher. A margin/hinge loss on bit decisions is the
    one cheap objective variant not yet tried.
-4. **Colour, 2 bits/channel: shipped.** `--rgb2` gives 64 colours as six bit
-   planes (1,536 bits, 192-bit key, 8×); over six paired seeds it cuts absolute
-   reconstruction error by 33.7% for 1.91× the gates. It is in the demo as
-   `cats16-rgb2`, and `eval` reports both `abs MAE vs original` and the
-   palette-relative MAE.
+4. **Colour, 2 bits/channel: shipped; 24-bit: ruled out.** `--rgb2` gives 64
+   colours as six bit planes (1,536 bits, 192-bit key, 8×); over six paired
+   seeds it cuts absolute reconstruction error by 33.7% for 1.91× the gates. It
+   is in the demo as `cats16-rgb2`, and `eval` reports both `abs MAE vs
+   original` and the palette-relative MAE. `--rgb8` (24 planes, no
+   quantisation) is implemented and exact, but the model cannot train on it:
+   16×16 scores 0.2120 abs MAE against 0.2031 for a constant mean image, and
+   4×4 scores 0.2382 against 0.1665. Half the planes are statistical noise
+   (neighbour-majority error 0.48 on the low nibble), so bit-MSE saturates at
+   its floor and the exported circuit never sees structure. See Checkpoint 11.
+   The follow-up if 24-bit is ever required: train only the high nibble (16
+   planes, 0.031 floor), and/or use same-resolution layers throughout so the
+   local window reads across columns at all.
 5. **Size-vs-BER frontier: first pass done.** `xorae prune` gives product
    0.1749 at 1,400 gates and 0.1775 at 1,300 (from 0.1722 at 1,547), steepening
    below 1,200. The greedy bypass rule is crude — better pruning (retrain or

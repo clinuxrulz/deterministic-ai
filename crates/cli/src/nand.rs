@@ -68,6 +68,15 @@ pub struct NandConfig {
     /// Candidates drawn from anywhere in an earlier layer.
     #[serde(default = "default_n_global")]
     pub n_global: usize,
+    /// Candidates at the same spatial position in another colour plane.
+    ///
+    /// Planar data is stacked channel-major, so every plane occupies its own
+    /// block of rows and a local window never crosses into another channel.
+    /// These candidates are the only *targeted* cross-channel wires; without
+    /// them a 24-plane model is 24 independent single-plane codecs and the
+    /// only mixing is through the random `n_global` picks.
+    #[serde(default = "default_n_channel")]
+    pub n_channel: usize,
     /// Probability that a long-range candidate comes from an earlier layer
     /// rather than the immediately previous one.
     #[serde(default = "default_skip_prob")]
@@ -131,6 +140,10 @@ fn default_n_local() -> usize {
 }
 fn default_n_global() -> usize {
     3
+}
+
+fn default_n_channel() -> usize {
+    0
 }
 fn default_skip_prob() -> f32 {
     0.30
@@ -197,7 +210,7 @@ impl NandConfig {
     }
 
     pub fn k(&self) -> usize {
-        self.n_local + self.n_global
+        self.n_local + self.n_global + self.n_channel
     }
 }
 
@@ -299,7 +312,15 @@ fn wire_candidates(
 ) -> (Vec<u32>, Vec<u32>) {
     let (oh, ow) = out_shape;
     let k = cfg.k();
+    let channels = cfg.channels.max(1);
     let (prev_acts, prev_shape) = readable[readable.len() - 1];
+    // Planar layers stack one plane per row block, so `plane_rows` is the
+    // height of one plane in the previous layer's grid.
+    let plane_rows = if channels > 1 && prev_shape.0 % channels == 0 {
+        prev_shape.0 / channels
+    } else {
+        0
+    };
     let mut cand_layer = Vec::with_capacity(oh * ow * k);
     let mut cand_idx = Vec::with_capacity(oh * ow * k);
     for oy in 0..oh {
@@ -317,6 +338,21 @@ fn wire_candidates(
                 };
                 cand_layer.push(src as u32);
                 cand_idx.push(rng.gen_range(0..shape.0 * shape.1) as u32);
+            }
+            for _ in 0..cfg.n_channel {
+                // Same place in the image, a different colour plane. The
+                // window rows stay inside one plane, so taking `row %
+                // plane_rows` keeps the spatial position and swaps channel.
+                let row = y0 + rng.gen_range(0..(y1 - y0).max(1));
+                let col = rng.gen_range(x0..x1.max(x0 + 1));
+                let index = if plane_rows > 0 {
+                    let plane = rng.gen_range(0..channels);
+                    (plane * plane_rows + row % plane_rows) * prev_shape.1 + col
+                } else {
+                    rng.gen_range(0..prev_shape.0 * prev_shape.1)
+                };
+                cand_layer.push(prev_acts as u32);
+                cand_idx.push(index as u32);
             }
         }
     }
@@ -1565,6 +1601,7 @@ mod tests {
             lr: 0.01,
             n_local: 4,
             n_global: 2,
+            n_channel: 0,
             skip_prob: 0.3,
             binarize_weight: 0.0,
             positive_weight: 1.0,
@@ -1598,6 +1635,73 @@ mod tests {
                     // Sources must be readable planes, never a later one.
                     assert!(src <= l, "layer {l} gate {j} reads plane {src}");
                     assert!(idx < net.acts_len(src), "index out of range");
+                }
+            }
+        }
+    }
+
+    /// The halving layers only shrink the row axis, and `window` then spans
+    /// `sy` rows by **one** column. So a local candidate never leaves its
+    /// column or its colour plane: the encoder is a stack of independent
+    /// per-plane column codecs, and only the random `n_global`/`n_channel`
+    /// picks mix them. This is the structural reason a 24-plane model can
+    /// reconstruct colour marginals without any spatial structure.
+    #[test]
+    fn halving_layers_never_leave_their_column_or_plane() {
+        let mut cfg = tiny_cfg();
+        cfg.image_size = 8;
+        cfg.channels = 24;
+        cfg.hidden = vec![768, 384];
+        cfg.key_bits = 192;
+        cfg.n_local = 9;
+        cfg.n_global = 3;
+        cfg.n_channel = 0;
+
+        let channels = cfg.channels;
+        let side = cfg.image_size;
+        let mut sizes = vec![side * side * channels];
+        sizes.extend(cfg.hidden.iter().copied());
+        sizes.push(cfg.key_bits);
+        let shapes = derive_shapes_from((side * channels, side), &sizes).unwrap();
+        assert_eq!(shapes, vec![(192, 8), (96, 8), (48, 8), (24, 8)]);
+
+        let k = cfg.k();
+        for seed in 0..4u64 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let net = Net::build(&cfg, &mut rng).unwrap();
+            for l in 0..net.enc_layers {
+                let (in_rows, in_cols) = shapes[l];
+                let (out_rows, out_cols) = shapes[l + 1];
+                // Plane-aligned layers only: the key can have fewer rows than
+                // planes, in which case one row spans several planes.
+                if out_rows % channels != 0 {
+                    continue;
+                }
+                let in_per_plane = in_rows / channels;
+                let out_per_plane = out_rows / channels;
+                assert!(out_per_plane < in_per_plane, "layer {l} is not halving");
+                let sy = in_per_plane / out_per_plane;
+                assert_eq!(sy, 2, "halving layers read two rows");
+                let layer = &net.layers[l];
+                for oy in 0..out_rows {
+                    for ox in 0..out_cols {
+                        let j = oy * out_cols + ox;
+                        let plane = oy / out_per_plane;
+                        let row_in_plane = oy % out_per_plane;
+                        let first = plane * in_per_plane + row_in_plane * sy;
+                        for c in 0..cfg.n_local {
+                            let src = layer.cand_layer[j * k + c] as usize;
+                            assert_eq!(src, l, "local candidate left its layer");
+                            let idx = layer.cand_idx[j * k + c] as usize;
+                            let (row, col) = (idx / in_cols, idx % in_cols);
+                            assert_eq!(col, ox, "seed {seed} layer {l} gate {j}");
+                            assert!(
+                                (first..first + sy).contains(&row),
+                                "seed {seed} layer {l} gate {j}: row {row} outside {first}..{}",
+                                first + sy
+                            );
+                        }
+                    }
                 }
             }
         }

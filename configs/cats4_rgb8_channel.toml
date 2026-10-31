@@ -1,0 +1,36 @@
+# 4x4 full 8-bit RGB with cross-plane candidates.
+#
+# Identical to cats4_rgb8.toml except each gate also gets 6 candidates at the
+# same spatial position in another colour plane, so a gate can read "the same
+# pixel, a different bit plane" instead of only its own plane. The local
+# window (9 candidates) is inside one plane, and the global picks are random,
+# so without these a 24-plane model is 24 independent plane codecs.
+image_size = 4
+channels = 24
+key_bits = 48
+hidden = [192, 96]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+n_channel = 6
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+polish_sweeps = 2
+polish_samples = 512
+
+relaxation = "product"
+
+seed = 42
+log_every = 10
+val_every = 25

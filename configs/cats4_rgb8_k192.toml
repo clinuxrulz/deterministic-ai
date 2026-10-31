@@ -1,0 +1,36 @@
+# 4x4 full 8-bit RGB, 192-bit key: 2x compression (rate control).
+#
+# Identical to cats4_rgb8.toml except the key is four times larger and the
+# hidden layers grow with it, so the question is whether the 8x failure is a
+# representation limit or simply too few key bits for a 384-bit image.
+#
+# 4x4x24 (384) -> [384, 192] -> 192 key bits -> [384, 192] -> 384
+# 2*(384+192) + 384 + 192 = 1,728 NAND gates.
+image_size = 4
+channels = 24
+key_bits = 192
+hidden = [384, 192]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+polish_sweeps = 2
+polish_samples = 512
+
+relaxation = "product"
+
+seed = 42
+log_every = 10
+val_every = 25

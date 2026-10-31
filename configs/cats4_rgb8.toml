@@ -1,0 +1,38 @@
+# Full 8-bit RGB at 4x4: 384 input bits, 24 bit planes, 48-bit key (8x).
+#
+# 4x4x24 -> 2x4x24 -> 1x4x24 -> 0.5x4x24 (48-bit key)
+# hidden [192, 96]; 2*(192+96) + 384 + 48 = 1,008 NAND gates.
+#
+# A deliberately tiny probe: the point is to find out whether this wiring can
+# represent colour at all, not to produce a useful image. The documented
+# memorisation test (--train-limit 100 --epochs 12000) costs about a minute
+# here instead of twenty, so capacity and representation can be separated
+# before spending gates at 16x16.
+image_size = 4
+channels = 24
+key_bits = 48
+hidden = [192, 96]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+polish_sweeps = 2
+polish_samples = 512
+
+relaxation = "product"
+
+seed = 42
+log_every = 10
+val_every = 25

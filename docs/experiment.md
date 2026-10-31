@@ -978,3 +978,189 @@ Lesson for any future tolerant metric here: never report F1@r without the
 same-density random baseline, and prefer the smallest radius that still
 forgives the cable's own quantisation (~1 px), because F1@r rises with r for
 *any* predictor that inks enough.
+
+## Checkpoint 11 (2026-10-31): full 24-bit RGB, and why it does not train
+
+The colour work so far used quantised palettes (rgb1 = 8 colours, rgb2 = 64).
+The question was whether the same circuit can be pointed at *unquantised*
+24-bit colour, and if so how many gates that costs. The answer is that it
+cannot, at any size this trainer reaches, and the reason is more interesting
+than the gate count.
+
+### What was built
+
+`ColorMode::Rgb8`: 24 bit planes, `R7..R0, G7..G0, B7..B0`, most significant
+bit first. `--rgb8` builds the dataset (mode byte 4, `channels = 24`),
+`Model::bits_to_rgb` rebuilds exact bytes and `eval` reports absolute MAE
+against the original. Verified on all 6,000 images: the 24 planes rebuild the
+resized RGB bytes with **0 mismatches**, so unlike rgb1 (floor 0.287) and rgb2
+(floor 0.083) there is no quantisation floor to hide behind. A perfect model
+scores 0.
+
+Also fixed here: `train-nand` validated `key_bits < image_size^2`, which is the
+input width only for one plane. rgb2's 192-bit key passed by luck at 16x16;
+rgb8's 768-bit key was rejected against 256 "inputs" although the tensor has
+6,144. The check now multiplies by `channels`.
+
+### The target is half noise, so BER is meaningless
+
+24 planes from CIFAR are not 24 learnable bits. Measuring how well a pixel's
+bit can be predicted from its four neighbours (majority vote) gives:
+
+| plane nibble | 16x16 | 4x4 |
+|---|---|---|
+| high (bits 7-4) | 0.2556 | 0.3730 |
+| low (bits 3-0) | 0.4820 | 0.4998 |
+| all 24 planes | 0.3688 | 0.4364 |
+
+The low nibble is at chance (0.50) at 4x4 and only 0.018 below it at 16x16:
+**adjacent-pixel bits in the low nibble are statistically independent**, so no
+circuit can predict them and any model pays ~0.5 BER on 12 of the 24 planes.
+The bit-MSE floor says the same thing from the soft side: predicting every bit
+as 0.5 costs 0.25, and the best neighbour-fraction predictor only reaches
+0.2368 (16x16) and 0.2959 (4x4, worse than 0.5 because a single 4x4 neighbour
+is a bad guess).
+
+That has two consequences, both of which matter for reading the results:
+
+- **A training MSE plateau near 0.23 is not evidence of learning.** The model
+  sits at 0.2284 (16x16) and 0.2308 (4x4), i.e. at the noise floor. The
+  gradient is dominated by bits that carry no information, which is exactly the
+  regime where "lower MSE, worse BER" appears (Checkpoint 5's wide model).
+- **BER is bounded below around 0.37 at 16x16**, so a model at 0.43 has
+  learned almost nothing rather than "0.43 of something".
+
+### Results
+
+All runs use the standard schedule (200 epochs, seed 42), `product`
+relaxation, and are judged by absolute MAE against the original bytes.
+
+| run | bits | key | gates trained (after simplify) | test BER | abs MAE |
+|---|---|---|---|---|---|
+| 16x16, 8x | 6,144 | 768 | 16,128 (9,286) | 0.4331 | 0.2120 |
+| 4x4, 8x | 384 | 48 | 1,008 (522) | 0.4425 | 0.2382 |
+| 4x4, 8x + 6 cross-plane candidates | 384 | 48 | 1,008 (505) | 0.4457 | 0.2396 |
+| 4x4, 4x | 384 | 96 | 1,056 (647) | 0.4373 | 0.2411 |
+| 4x4, 2x | 384 | 192 | 1,728 (1,115) | **0.4110** | 0.2325 |
+| 4x4, 8x, 8 NAND levels deep | 384 | 48 | 1,584 (755) | 0.4622 | 0.2764 |
+
+The rate control is the one place where BER moves: 0.4425 -> 0.4110 going from an
+8x to a 2x key. But it buys almost nothing in colour: abs MAE goes 0.2382 ->
+0.2325. The improvement is in the low nibble, which the noise analysis above
+says is unpredictable anyway, so a bigger key lets the model guess the noise
+slightly better while the bytes, which are what a viewer sees, stay wrong. This
+is the cleanest demonstration that BER is the wrong objective for this target.
+
+Two reference predictions on the same splits, neither learned:
+
+| predictor | 16x16 abs MAE | 4x4 abs MAE |
+|---|---|---|
+| all-zero | 0.4542 | 0.4537 |
+| mean image (per-pixel mean of the training set) | **0.2031** | **0.1665** |
+| mean of the four neighbouring pixels of the same image | 0.0485 | 0.0880 |
+
+**Every configuration is behind a constant mean image**, and the neighbour mean
+is 2-4x better than the bar the model fails to clear. Whatever the circuit
+learns, it is not local smoothness, which is the one structure colour images
+are full of. The contact sheets are colour noise with roughly the right
+marginals, and pixel accuracy is 0.00% (no pixel in any test image is exactly
+reconstructed, out of 1,000 images).
+
+### Memorisation still fails
+
+Checkpoint 5 established the diagnostic: can the model fit 100 images at all?
+The colour answer is no, at either size, with the update count matched to a
+full run:
+
+| run | updates | train BER on the 100 |
+|---|---|---|
+| 16x16 24-bit, 12,000 epochs | ~18,700 | **0.3839** |
+| 4x4 24-bit, 12,000 epochs | ~18,700 | **0.4130** |
+| 4x4 24-bit + cross-plane, 12,000 epochs | ~18,700 | 0.3829 |
+| 4x4 24-bit, 8 NAND levels deep, 12,000 epochs | ~18,700 | 0.4130 |
+| 32x32 grayscale (Checkpoint 5) | ~12,000 | 0.1741 |
+
+So it is not data volume, not the key size, and not the number of gates: 16,128
+gates cannot memorise 100 colour images, while 2,688 gates memorise 100
+grayscale ones to 0.1741. Doubling the depth does not change the memorisation
+number at all (0.4130 either way) and makes held-out BER worse (0.4719 val vs
+0.4600), so depth is not the missing piece on its own.
+
+### Why: depth and independence, not gate count
+
+The wiring is fixed and hierarchical, and two properties of it are fatal here.
+Both are now asserted in `halving_layers_never_leave_their_column_or_plane`.
+
+**1. Each output bit depends on at most `2^d` input bits**, where `d` is the
+total number of gate levels from input to output (induction: a gate's
+dependency set is the union of its two inputs'). The 16x16 model has three
+halving layers per side, so `d = 6` and an output bit sees at most **64 of
+6,144** input bits. The 4x4 model has `d = 4`, so **16 of 384**. The deep 4x4
+variant doubles `d` to 8 (256 inputs) and is worse on every measure -- BER
+0.4622 vs 0.4425, abs MAE 0.2764 vs 0.2382, and the same memorisation number
+(0.4130 on 100 images) -- so depth at this width is not a free win either; it
+needs the objective and the data path to go with it.
+
+**2. For planar colour the halving layers never mix columns or planes.**
+Planar data is tall (`channels × size` rows by `size` columns), so
+`derive_shapes_from` only ever shrinks the row axis and `window` returns `sy`
+rows by **one** column. Every local candidate is therefore inside its own
+column and its own colour plane, and the encoder is a stack of independent
+per-plane column codecs; the only cross-plane mixing is the random `n_global`
+long-range picks. Adding `n_channel` candidates (same spatial position, another
+plane) is the targeted version of that, and it moved 4x4 by nothing
+(0.2382 -> 0.2396).
+
+Two corollaries follow. Colour information cannot flow between planes through
+the local windows, so each plane is reconstructed from its own bits only; and
+because a key bit sees one column, the circuit cannot move ink horizontally at
+all. A same-resolution layer (target width == previous width) is the only
+mechanism in the current design that reads across columns, which is why the
+deep configuration exists; it lost here.
+
+### Conclusion
+
+24-bit RGB at 8x compression is **not achievable with this architecture** at
+16x16 or 4x4, and the earlier estimate of ~37,500 gates for 32x32 was answering
+the wrong question: adding gates to a depth-6 circuit that cannot fit 100
+images would not help. The binding constraints are the depth bound on
+dependency, the column/plane independence of the local windows, and -- above
+all -- an objective that is dominated by unlearnable low-order bits.
+
+That last point is the most actionable. `rgb2` (64 colours, 2 bits/channel)
+already scores abs MAE 0.2362 on 16x16 with a 0.083 quantisation floor and is
+shipped; at 24 bits/channel the extra six planes are mostly sensor/compression
+noise, so the representation asks the circuit to predict randomness with 8x the
+planes. The honest options are, in order:
+
+1. Keep the quantised target and spend gates on structure (the existing track).
+2. Train on the *high* nibble only (16 planes, 0.031 floor) and treat the low
+   nibble as dither -- halves the bits and removes the noise from the loss.
+3. If true 24-bit is required, the architecture needs cross-column depth (same
+   resolution layers throughout, i.e. a real CNN-like stack) and a loss that
+   is not bit-MSE, because bit-MSE cannot see structure through the noise.
+
+### Reproduce
+
+```bash
+cargo run --release -p xorae -- preprocess --cifar-dir data/cifar-10-batches-bin \
+  --out data/cats16_rgb8.bin --size 16 --rgb8
+cargo run --release -p xorae -- preprocess --cifar-dir data/cifar-10-batches-bin \
+  --out data/cats4_rgb8.bin --size 4 --rgb8
+
+RAYON_NUM_THREADS=6 cargo run --release -p xorae -- train-nand \
+  --config configs/cats16_rgb8.toml --data data/cats16_rgb8.bin --out runs/rgb8_stageb
+RAYON_NUM_THREADS=6 cargo run --release -p xorae -- eval \
+  --model runs/rgb8_stageb/model.json --data data/cats16_rgb8.bin --split test
+
+# 4x4 variants: baseline, cross-plane candidates, rate controls, depth
+for c in cats4_rgb8 cats4_rgb8_channel cats4_rgb8_k96 cats4_rgb8_k192 cats4_rgb8_deep; do
+  RAYON_NUM_THREADS=2 cargo run --release -p xorae -- train-nand \
+    --config configs/$c.toml --data data/cats4_rgb8.bin --out runs/$c
+done
+
+# memorisation probe (12,000 epochs matches a full run's update count)
+RAYON_NUM_THREADS=2 cargo run --release -p xorae -- train-nand \
+  --config configs/cats4_rgb8.toml --data data/cats4_rgb8.bin \
+  --out runs/rgb8_4x4_fit100 --epochs 12000 --train-limit 100
+```

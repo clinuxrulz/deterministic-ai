@@ -1,0 +1,41 @@
+# 4x4 full 8-bit RGB with same-resolution layers, i.e. more depth.
+#
+# The default 4x4 config halves rows twice (4 -> 2 -> 1), so the circuit is
+# only four NAND levels deep: input -> h1 -> key -> h1' -> pixels. A depth-d
+# binary NAND tree can only reach 2^d input bits, so every output is a
+# function of at most 16 of the 384 input bits. That is a *depth* limit, not a
+# gate-count or compression limit, and it is the thing "more hidden layers"
+# would actually buy.
+#
+# A same-resolution layer (target width == previous width) reads a 3x3
+# neighbourhood at the same scale and adds a gate level without changing the
+# shape. Two per side double the depth to 8 at 2*(192+192+96+96) + 384 + 48
+# = 1,584 gates, still trivial.
+image_size = 4
+channels = 24
+key_bits = 48
+hidden = [192, 192, 96, 96]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+polish_sweeps = 2
+polish_samples = 512
+
+relaxation = "product"
+
+seed = 42
+log_every = 10
+val_every = 25
