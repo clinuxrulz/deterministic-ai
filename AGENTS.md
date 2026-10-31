@@ -321,6 +321,12 @@ Two consequences of the fixed wiring that bound what any config can learn
   Grayscale 32×32 is different: its shape is square, so the halving alternates
   rows and columns and layer 2 does read two columns.
 
+Hidden widths may exceed the input: `derive_shapes_from` grows the longer axis
+by an integer factor (an expansion layer), and `window` then upsamples with
+overlapping 3×3 windows. `configs/cats4_rgb8_wide.toml` starts at 768 for a
+384-bit input and is the best 4×4 colour run (0.2319 abs MAE) — still behind a
+constant mean image, so the mechanism exists but the target does not follow.
+
 ## What has been ruled out (with evidence)
 
 Do not spend time re-running these.
@@ -347,7 +353,7 @@ Do not spend time re-running these.
 | Łukasiewicz gate relaxation | 0.2117 at seed 42 vs 0.1722. Nilpotent: zero gradient whenever `u + v <= 1` |
 | Gödel `min` as the default | Better at equal training budget (−0.0089 over 10 seeds) but much worse at equal size: pruned to 1,400 gates it scores 0.2154 vs 0.1811 for product (0/5 seeds win). Its extra gates are load-bearing |
 | **24-bit RGB (`--rgb8`)** | 16×16: abs MAE **0.2120** vs mean image 0.2031 (16,128 gates). 4×4: **0.2382** vs 0.1665 (1,008 gates). Cannot memorise 100 images either (train BER 0.3839 at 16×16 after ~18,700 updates, vs 0.1741 for grayscale). Half the planes are noise — see Checkpoint 11 |
-| 4×4 with more rate / mixing / depth | Key 48→96→192: abs MAE 0.2411 / **0.2325** (BER falls 0.4425→0.4110, but the gain is entirely in the noise planes). Cross-plane candidates: 0.2396. Same-resolution layers (8 levels instead of 4): 0.2764, and the same memorisation number (0.4130). Nothing approaches the 0.1665 bar |
+| 4×4 with more rate / mixing / depth / width | Key 48→96→192: abs MAE 0.2411 / **0.2325** (BER falls 0.4425→0.4110, but the gain is entirely in the noise planes). Cross-plane candidates: 0.2396. Same-resolution layers (8 levels instead of 4): 0.2764, same memorisation number (0.4130). Overcomplete first layer (3,312 gates, 5 levels per side): 0.2319, best of the family, 2.6× the gates for 0.006 MAE and memorisation 0.3977. Nothing approaches the 0.1665 bar |
 
 ## Open threads, in priority order
 

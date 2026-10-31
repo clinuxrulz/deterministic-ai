@@ -1017,16 +1017,20 @@ The low nibble is at chance (0.50) at 4x4 and only 0.018 below it at 16x16:
 **adjacent-pixel bits in the low nibble are statistically independent**, so no
 circuit can predict them and any model pays ~0.5 BER on 12 of the 24 planes.
 The bit-MSE floor says the same thing from the soft side: predicting every bit
-as 0.5 costs 0.25, and the best neighbour-fraction predictor only reaches
-0.2368 (16x16) and 0.2959 (4x4, worse than 0.5 because a single 4x4 neighbour
-is a bad guess).
+as 0.5 costs 0.25, and a predictor that only looks at the four neighbours
+reaches 0.2368 (16x16) and 0.2959 (4x4, worse than 0.5 because a single 4x4
+neighbour is a bad guess). The true floor is lower -- the encoder sees the
+whole image, so the high nibble is nearly free and only the 12 noise planes
+cost their 0.25, i.e. about 0.125 -- but every local predictor lands near 0.24.
 
 That has two consequences, both of which matter for reading the results:
 
 - **A training MSE plateau near 0.23 is not evidence of learning.** The model
-  sits at 0.2284 (16x16) and 0.2308 (4x4), i.e. at the noise floor. The
-  gradient is dominated by bits that carry no information, which is exactly the
-  regime where "lower MSE, worse BER" appears (Checkpoint 5's wide model).
+  sits at 0.2284 (16x16) and 0.2308 (4x4), about where a neighbour-only
+  predictor lands. It is not saturated either (the entropy floor is nearer
+  0.125), it is stuck: the gradient is dominated by bits that carry no
+  information, which is exactly the regime where "lower MSE, worse BER"
+  appears (Checkpoint 5's wide model).
 - **BER is bounded below around 0.37 at 16x16**, so a model at 0.43 has
   learned almost nothing rather than "0.43 of something".
 
@@ -1043,6 +1047,7 @@ relaxation, and are judged by absolute MAE against the original bytes.
 | 4x4, 4x | 384 | 96 | 1,056 (647) | 0.4373 | 0.2411 |
 | 4x4, 2x | 384 | 192 | 1,728 (1,115) | **0.4110** | 0.2325 |
 | 4x4, 8x, 8 NAND levels deep | 384 | 48 | 1,584 (755) | 0.4622 | 0.2764 |
+| 4x4, 8x, overcomplete first hidden layer | 384 | 48 | 3,312 (1,150) | 0.4504 | **0.2319** |
 
 The rate control is the one place where BER moves: 0.4425 -> 0.4110 going from an
 8x to a 2x key. But it buys almost nothing in colour: abs MAE goes 0.2382 ->
@@ -1050,6 +1055,16 @@ The rate control is the one place where BER moves: 0.4425 -> 0.4110 going from a
 says is unpredictable anyway, so a bigger key lets the model guess the noise
 slightly better while the bytes, which are what a viewer sees, stay wrong. This
 is the cleanest demonstration that BER is the wrong objective for this target.
+
+Widening the first hidden layer past the input (384 -> 768 -> 384 -> 192 ->
+96 -> 48, 3,312 gates, 5 levels per side, so the `2^depth` cap of 1,024
+finally covers the whole 384-bit input) is the best byte score of the 4x4
+family at **0.2319**, and still 0.065 behind the constant. Two thirds of the
+added gates die in simplification (3,312 -> 1,150), so the trainer does not
+spend the extra capacity. Expansion layers are supported now
+(`derive_shapes_from` grows the longer axis by an integer factor and `window`
+upsamples with overlapping 3x3 windows); the mechanism works, the target does
+not.
 
 Two reference predictions on the same splits, neither learned:
 
@@ -1078,13 +1093,17 @@ full run:
 | 4x4 24-bit, 12,000 epochs | ~18,700 | **0.4130** |
 | 4x4 24-bit + cross-plane, 12,000 epochs | ~18,700 | 0.3829 |
 | 4x4 24-bit, 8 NAND levels deep, 12,000 epochs | ~18,700 | 0.4130 |
+| 4x4 24-bit, overcomplete first layer, 12,000 epochs | ~18,700 | 0.3977 |
 | 32x32 grayscale (Checkpoint 5) | ~12,000 | 0.1741 |
 
 So it is not data volume, not the key size, and not the number of gates: 16,128
 gates cannot memorise 100 colour images, while 2,688 gates memorise 100
 grayscale ones to 0.1741. Doubling the depth does not change the memorisation
 number at all (0.4130 either way) and makes held-out BER worse (0.4719 val vs
-0.4600), so depth is not the missing piece on its own.
+0.4600), so depth is not the missing piece on its own. Widening the first
+hidden layer past the input does help a little -- 0.4130 -> 0.3977 for 3.3x the
+gates (1,008 -> 3,312), the best fit of any colour run -- but 0.40 is still
+noise, and only 1,150 of those 3,312 gates survive simplification.
 
 ### Why: depth and independence, not gate count
 
@@ -1123,9 +1142,17 @@ deep configuration exists; it lost here.
 24-bit RGB at 8x compression is **not achievable with this architecture** at
 16x16 or 4x4, and the earlier estimate of ~37,500 gates for 32x32 was answering
 the wrong question: adding gates to a depth-6 circuit that cannot fit 100
-images would not help. The binding constraints are the depth bound on
-dependency, the column/plane independence of the local windows, and -- above
-all -- an objective that is dominated by unlearnable low-order bits.
+images would not help.
+
+The three suspects were capacity, wiring, and the objective, and the 4x4 sweep
+tests all three. Capacity: 3.3x the gates with an overcomplete first layer
+(3,312 instead of 1,008) moves abs MAE from 0.2382 to 0.2319 and memorisation
+from 0.4130 to 0.3977 -- real, tiny, and still noise. Wiring: cross-plane
+candidates do nothing (0.2396); the depth cap is removed entirely at 5 levels
+per side (`2^10 > 384` input bits) without a change in outcome. The objective is
+what is left: bit-MSE over 24 planes is dominated by the 12 that are
+unpredictable, so the gradient never pushes on the structure that a viewer sees,
+and every run stalls near the error of a neighbour-only predictor.
 
 That last point is the most actionable. `rgb2` (64 colours, 2 bits/channel)
 already scores abs MAE 0.2362 on 16x16 with a 0.083 quantisation floor and is
@@ -1153,8 +1180,9 @@ RAYON_NUM_THREADS=6 cargo run --release -p xorae -- train-nand \
 RAYON_NUM_THREADS=6 cargo run --release -p xorae -- eval \
   --model runs/rgb8_stageb/model.json --data data/cats16_rgb8.bin --split test
 
-# 4x4 variants: baseline, cross-plane candidates, rate controls, depth
-for c in cats4_rgb8 cats4_rgb8_channel cats4_rgb8_k96 cats4_rgb8_k192 cats4_rgb8_deep; do
+# 4x4 variants: baseline, cross-plane candidates, rate controls, depth, width
+for c in cats4_rgb8 cats4_rgb8_channel cats4_rgb8_k96 cats4_rgb8_k192 \
+         cats4_rgb8_deep cats4_rgb8_wide; do
   RAYON_NUM_THREADS=2 cargo run --release -p xorae -- train-nand \
     --config configs/$c.toml --data data/cats4_rgb8.bin --out runs/$c
 done

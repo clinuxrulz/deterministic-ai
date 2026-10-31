@@ -277,7 +277,9 @@ impl Net {
     }
 }
 
-/// Derive an image shape for every layer by halving the longer axis.
+/// Derive an image shape for every layer: halve the longer axis to compress,
+/// multiply it by an integer factor to expand. Expansion layers are how a
+/// network can start wider than its input.
 pub(crate) fn derive_shapes(side: usize, sizes: &[usize]) -> Result<Vec<(usize, usize)>> {
     derive_shapes_from((side, side), sizes)
 }
@@ -323,10 +325,20 @@ pub(crate) fn derive_shapes_from(
                 bail!("layer width {target} is not reachable from area {area}");
             }
         } else {
-            bail!(
-                "layer width {target} is not a reduction of {area}; \
-                 choose hidden widths that reduce the image area"
-            );
+            // Expansion layer (e.g. 384 -> 768): grow the longer axis by an
+            // integer factor. The other axis is untouched, so the plane stack
+            // stays rectangular, and `window` upsamples with overlapping 3x3
+            // windows -- which is also the only local mechanism that reads
+            // across columns.
+            if target % area != 0 {
+                bail!("layer width {target} is not an integer multiple of {area}");
+            }
+            let factor = target / area;
+            cur = if cur.0 >= cur.1 {
+                (cur.0 * factor, cur.1)
+            } else {
+                (cur.0, cur.1 * factor)
+            };
         }
         if cur.0 * cur.1 != target {
             bail!("internal shape error for width {target}");
@@ -1164,6 +1176,16 @@ mod tests {
     #[test]
     fn shapes_reject_indivisible_widths() {
         assert!(derive_shapes(8, &[64, 41, 8]).is_err());
+    }
+
+    #[test]
+    fn shapes_support_expansion_layers() {
+        // 4x4 with 24 planes starts at 96x4. A layer wider than the input
+        // grows the longer axis, which for planar colour is the plane stack.
+        let shapes = derive_shapes_from((96, 4), &[384, 768, 384, 96, 48]).unwrap();
+        assert_eq!(shapes, vec![(96, 4), (192, 4), (96, 4), (24, 4), (12, 4)]);
+        // Non-integer growth is rejected rather than silently rounded.
+        assert!(derive_shapes_from((96, 4), &[384, 500]).is_err());
     }
 
     #[test]

@@ -1,0 +1,39 @@
+# 4x4 full 8-bit RGB with an overcomplete first hidden layer.
+#
+# Every config so far halves the input immediately: 384 bits -> 192 -> 96 ->
+# 48-key. This one expands first (384 -> 768) and then compresses, so the
+# network spends gates on a wider representation than the input itself. That
+# is the standard autoencoder shape, and it also changes the data path: an
+# expansion layer upsamples with overlapping 3x3 windows, which is the only
+# local mechanism that reads across columns (see Checkpoint 11).
+#
+# shapes: (96,4) -> (192,4) -> (96,4) -> (48,4) -> (24,4) -> key (12,4)
+# hidden [768, 384, 192, 96]; 3,312 NAND gates, 5 gate levels per side.
+image_size = 4
+channels = 24
+key_bits = 48
+hidden = [768, 384, 192, 96]
+
+epochs = 200
+batch = 64
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+polish_sweeps = 2
+polish_samples = 512
+
+relaxation = "product"
+
+seed = 42
+log_every = 10
+val_every = 25
