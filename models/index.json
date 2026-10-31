@@ -7,6 +7,18 @@
       "description": "Best grayscale: 1,547 NAND gates after exact simplification (2,688 trained), 128-bit key, 8x compression, test BER 17.27%."
     },
     {
+      "id": "cats32-edge",
+      "name": "CIFAR cats 32×32 · Sobel edges (line drawings)",
+      "path": "models/cats32-edge.json",
+      "description": "Edge binarization keeps the strongest 15% of Sobel gradients, so the target is a line drawing and stays legible at 32×32. 2,246 NAND gates, 128-bit key, test BER 30.78%. Negative result: the trainer cannot fit strokes this thin — the best validation epoch is the random initialisation, and edge F1@1.5 is 0.574 against 0.564 for random ink — so the reconstruction is noise even though the input reads as a cat."
+    },
+    {
+      "id": "cats32-pal4",
+      "name": "CIFAR cats 32×32 · 4-level grey (2,048 bits)",
+      "path": "models/cats32-pal4.json",
+      "description": "Four-colour palette, two bit planes per pixel, 256-bit key, 2,695 gates. The targets are recognisable cats and the input panel shows them, but the reconstruction is still unstructured: abs MAE 21.0%, index accuracy 52.2%, BER 28.9% after 1,000 epochs."
+    },
+    {
       "id": "cats16-rgb2",
       "name": "CIFAR cats 16×16 · RGB 2-bit/channel (64 colours)",
       "path": "models/cats16-rgb2.json",
