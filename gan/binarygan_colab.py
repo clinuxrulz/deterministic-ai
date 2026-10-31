@@ -1,14 +1,9 @@
-"""BinaryGAN with a NAND-circuit generator -- single-file Colab version.
+"""BinaryGAN with a NAND-circuit generator -- single-file Colab version (16x16).
 
-    !python binarygan_colab.py                  # 16x16, 1,024 gates
-    SIDE=32 HIDDEN=512,1024 LATENT=96 python binarygan_colab.py   # 32x32
-
-Only needs torch, torchvision and matplotlib (preinstalled on Colab).
-Downloads CIFAR-10, trains, shows samples, snaps the wiring to a literal NAND
-circuit and writes gan{side}_circuit.json.
-
-The generator's gate count is sum(hidden) + side*side; the discriminator is
-deliberately small (see its comment) so it cannot win immediately.
+Layers are laid out layer by layer: each gate reads the immediately previous
+layer, so the exported circuit is as deep as the architecture. An earlier
+version allowed any earlier layer and collapsed to depth 3, with 35% of gates
+reading the latent directly.
 """
 
 import torch, torchvision, sys
@@ -56,17 +51,22 @@ def build_wiring(sizes, k, skip_prob, seed):
     layers = []
     for layer in range(1, len(sizes)):
         prev_start, prev_end = offsets[layer - 1], offsets[layer]
-        idx = torch.randint(0, prev_end, (sizes[layer], k), generator=g)
-        if layer > 1:
-            use_prev = torch.rand(sizes[layer], k, generator=g) < skip_prob
-            in_prev = torch.randint(prev_start, prev_end, (sizes[layer], k), generator=g)
-            idx = torch.where(use_prev, in_prev, idx)
+        # Default to the immediately previous layer, so the exported circuit
+        # really is as deep as the architecture. Allowing every earlier layer by
+        # default lets the search short-circuit: in the first 32x32 export, 35%
+        # of gates read the latent directly and the whole circuit collapsed to
+        # depth 3.
+        idx = torch.randint(prev_start, prev_end, (sizes[layer], k), generator=g)
+        if layer > 1 and skip_prob > 0:
+            use_far = torch.rand(sizes[layer], k, generator=g) < skip_prob
+            far = torch.randint(0, prev_end, (sizes[layer], k), generator=g)
+            idx = torch.where(use_far, far, idx)
         layers.append(idx)
     return layers
 
 
 class Generator(nn.Module):
-    def __init__(self, sizes=(64, 128, 256, 256), k=16, skip_prob=0.3, seed=0):
+    def __init__(self, sizes=(64, 128, 256, 256), k=16, skip_prob=0.0, seed=0):
         super().__init__()
         self.sizes = list(sizes)
         self.k = k
@@ -123,7 +123,7 @@ latent_bits = int(os.environ.get("LATENT", "96" if SIDE == 32 else "64"))
 hidden = [int(x) for x in os.environ.get("HIDDEN", "512,1024" if SIDE == 32 else "256,512").split(",")]
 batch, steps = int(os.environ.get("BATCH", "64")), int(os.environ.get("STEPS", "20000"))
 sizes = [latent_bits, *hidden, side * side]
-G = Generator(sizes, k=16, skip_prob=0.3, seed=0).to(device)
+G = Generator(sizes, k=16, skip_prob=0.0, seed=0).to(device)
 D = Discriminator(side).to(device)
 print("generator gates:", sum(sizes[1:]))
 
@@ -195,7 +195,15 @@ def snap(model):
             "outputs": [base + gate_offsets[-2] + i for i in range(model.sizes[-1])]}
 
 circuit = snap(G)
+n_in = circuit["n_inputs"]; base = n_in + 2
+depth = [0] * (base + len(circuit["gates"]))
+for i, gate in enumerate(circuit["gates"]):
+    depth[base + i] = max(depth[gate["a"]], depth[gate["b"]]) + 1
+out_depth = max(depth[o] for o in circuit["outputs"])
+direct = sum(1 for gate in circuit["gates"] if gate["a"] < n_in or gate["b"] < n_in)
 print("circuit:", circuit["n_inputs"], "inputs,", len(circuit["gates"]), "gates,", len(circuit["outputs"]), "outputs")
+print(f"exported depth {out_depth} of {G.layers} layers | {direct} gates ({100*direct/len(circuit['gates']):.1f}%) read the latent directly",
+      "-- depth should equal layers; if it does not, the wiring is short-circuiting")
 
 # Discretisation gap: soft generator vs snapped wiring, on the same latents.
 z = latent(256, latent_bits, device)
