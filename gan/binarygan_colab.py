@@ -5,8 +5,11 @@ Paste this whole file into one Colab cell, or run:
     !python binarygan_colab.py
 
 Only needs torch, torchvision and matplotlib (all preinstalled on Colab).
-Downloads CIFAR-10, trains for a few thousand steps, shows samples, snaps the
-wiring to a literal NAND circuit and writes gan16_circuit.json.
+Downloads CIFAR-10, trains 20k steps, shows samples, snaps the wiring to a
+literal NAND circuit and writes gan16_circuit.json.
+
+Generator: 64-bit latent -> 256 -> 512 -> 256 pixels = 1,024 NAND gates.
+Discriminator: ~9k parameters, kept small on purpose (see the comment).
 """
 
 import torch, torchvision, sys
@@ -82,17 +85,18 @@ class Generator(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, side=16, channels=64):
+    # Deliberately small: the generator is only ~1k gates, so a 650k-parameter
+    # discriminator separates real from fake instantly and G never learns.
+    def __init__(self, side=16, channels=16):
         super().__init__()
         c = channels
         self.body = nn.Sequential(
             nn.Conv2d(1, c, 4, 2, 1), nn.LeakyReLU(0.2),
             nn.Conv2d(c, c * 2, 4, 2, 1), nn.LeakyReLU(0.2),
-            nn.Conv2d(c * 2, c * 4, 4, 2, 1), nn.LeakyReLU(0.2),
             nn.Flatten(),
         )
-        s = side // 8
-        self.head = nn.Linear(c * 4 * s * s, 1)
+        s = side // 4
+        self.head = nn.Linear(c * 2 * s * s, 1)
 
     def forward(self, x):
         return self.head(self.body(x))
@@ -108,8 +112,8 @@ def latent(batch, bits, device):
 
 import time
 
-side, latent_bits, batch, steps = 16, 64, 64, 4000
-sizes = [latent_bits, 128, 256, side * side]
+side, latent_bits, batch, steps = 16, 64, 64, 20000
+sizes = [latent_bits, 256, 512, side * side]
 G = Generator(sizes, k=16, skip_prob=0.3, seed=0).to(device)
 D = Discriminator(side).to(device)
 print("generator gates:", sum(sizes[1:]))
