@@ -886,3 +886,55 @@ Three conclusions:
 The gate search still trails the linear read-out by more than it does on keys
 (11.2 vs 7.3 points), and only 429 of 928 trained gates survive simplification,
 so utilisation remains the open problem.
+
+## Checkpoint 10 (2026-10-31): is the target even legible?
+
+The complaint that started this: after binarisation the 32x32 cats no longer
+look like cats, so "does the reconstruction look right" cannot judge the model.
+It is true. Rendering the grayscale original above its thresholded target makes
+the point in one image -- a *perfect* circuit still emits blobs.
+
+Three representations were compared on the same images.
+
+| representation | bits | key | gates (after simplify) | BER | ones F1 | IoU | key entropy |
+|---|---|---|---|---|---|---|---|
+| threshold (shipped) | 1,024 | 128 | 1,547 | **0.1727** | **0.783** | 0.643 | **0.926** |
+| Sobel edges, top 15% | 1,024 | 128 | 2,246 | 0.3078 | 0.198 | 0.110 | **0.291** |
+| 4-level palette, 200 ep | 2,048 | 256 | 2,918 | 0.3174 | — | — | — |
+| 4-level palette, 1,000 ep | 2,048 | 256 | 2,695 | 0.2886 | — | — | — |
+
+**`--binarize edge` produces legible line drawings and cannot be trained.** The
+best validation epoch is epoch 0, the random initialisation; 200 epochs never
+beat it, so the exported model is the init plus polish. Positive weighting
+(`--positive-weight` 6 and 100) demonstrably reaches the loss -- train MSE
+0.15 -> 9.8 -- but changes nothing that survives selection, because selection
+still picks epoch 0. Key entropy 0.926 -> 0.291 says the same thing: the
+encoder gave up and the key stopped varying.
+
+**BER hid the failure.** On a 15%-ones target, all-zero scores BER 0.15, so
+0.31 reads as "worse but nearby" while the output is noise. `eval` now prints
+**ones F1** and **ones IoU**, which is the honest pair for a sparse target.
+
+**4-level grey is legible but the rate is too tight.** A 4-colour palette at
+32x32 (`--palette 4`, 2,048 bits, `channels = 2`, 256-bit key) has clearly
+recognisable targets, and it trains smoothly -- 0.4429 -> 0.2886 over 1,000
+epochs, best at epoch 850 -- but never converges to anything structured.
+Per *pixel* it carries 0.25 key bits against 0.125 for the shipped model, i.e.
+twice the information rate at 1.7x the gates, and half of its 5,376 trained
+gates die in simplification (2,695 survive).
+
+Practical conclusions:
+
+- The shipped model is not the weak link: at ones F1 0.783 it reproduces its
+  target faithfully. The target is what looks wrong, and no model can fix that.
+- Judge 1-bit reconstructions by F1 against the binarised target, and look at
+  the grayscale original only for context.
+- A visually faithful 32x32 generator needs more than 1 bit per pixel *and*
+  more capacity per bit; 4-level at 8x compression is on the wrong side of the
+  frontier. The untested step is a 512-bit key (4x compression) at the same
+  bit count.
+
+Incidental fixes: `--palette` panicked for any dataset with more than one image
+(`from_color_parts` called `rgb_to_gray` on the whole buffer rather than per
+row); `run_nand` now checks bit planes as `channels * bits_per_pixel`, which is
+what lets a palette dataset train at all.
