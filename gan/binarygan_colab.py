@@ -1,9 +1,13 @@
 """BinaryGAN with a NAND-circuit generator -- single-file Colab version (16x16).
 
-Layers are laid out layer by layer: each gate reads the immediately previous
-layer, so the exported circuit is as deep as the architecture. An earlier
-version allowed any earlier layer and collapsed to depth 3, with 35% of gates
-reading the latent directly.
+Recipe notes (from the first runs, where d hit 0.000 and g rose to +4):
+- gain anneals to 8, not 32: at 32 the candidate softmax saturates and the
+  generator's gradients vanish.
+- separate learning rates (D slower than G),
+- instance noise on the discriminator's inputs so it cannot be perfect,
+- EMA of the generator, used for sampling and export.
+
+Layers are layered: each gate reads the immediately previous layer.
 """
 
 import torch, torchvision, sys
@@ -116,51 +120,79 @@ def binarize(probs):
 def latent(batch, bits, device):
     return (torch.rand(batch, bits, device=device) < 0.5).float()
 
+import os
 import time
 
 side = SIDE
 latent_bits = int(os.environ.get("LATENT", "96" if SIDE == 32 else "64"))
 hidden = [int(x) for x in os.environ.get("HIDDEN", "512,1024" if SIDE == 32 else "256,512").split(",")]
-batch, steps = int(os.environ.get("BATCH", "64")), int(os.environ.get("STEPS", "20000"))
+batch = int(os.environ.get("BATCH", "64"))
+steps = int(os.environ.get("STEPS", "100000"))
+gain_end = float(os.environ.get("GAIN_END", "8.0"))     # 8, not 32: see note
+d_lr = float(os.environ.get("D_LR", "1e-4"))
+g_lr = float(os.environ.get("G_LR", "3e-4"))
+ema_decay = float(os.environ.get("EMA", "0.999"))
+noise = float(os.environ.get("NOISE", "0.05"))          # instance noise on D inputs
+
 sizes = [latent_bits, *hidden, side * side]
 G = Generator(sizes, k=16, skip_prob=0.0, seed=0).to(device)
 D = Discriminator(side).to(device)
-print("generator gates:", sum(sizes[1:]))
+print("generator gates:", sum(sizes[1:]), "| discriminator params:", sum(p.numel() for p in D.parameters()))
+print(f"steps {steps}, gain_end {gain_end}, d_lr {d_lr}, g_lr {g_lr}, ema {ema_decay}, noise {noise}")
 
-optG = torch.optim.Adam(G.parameters(), lr=2e-4, betas=(0.5, 0.999))
-optD = torch.optim.Adam(D.parameters(), lr=2e-4, betas=(0.5, 0.999))
+# Exponential moving average of the generator, used for sampling and export.
+ema_alpha = [p.detach().clone() for p in G.alpha]
+ema_beta = [p.detach().clone() for p in G.beta]
+
+optG = torch.optim.Adam(G.parameters(), lr=g_lr, betas=(0.5, 0.999))
+optD = torch.optim.Adam(D.parameters(), lr=d_lr, betas=(0.5, 0.999))
 started = time.time()
 
+def add_noise(x):
+    if noise <= 0:
+        return x
+    flip = torch.rand_like(x) < noise / 2
+    return torch.where(flip, 1 - x, x)
+
 for step in range(1, steps + 1):
-    gain = 1.0 * (32.0 / 1.0) ** min(1.0, step / (0.85 * steps))
+    gain = 1.0 * (gain_end / 1.0) ** min(1.0, step / (0.85 * steps))
 
     idx = torch.randint(0, real.shape[0], (batch,), device=device)
-    assert real.shape[1:] == (1, side, side), f"real has shape {tuple(real.shape)}, expected (N, 1, {side}, {side})"
+    assert real.shape[1:] == (1, side, side)
     fake = binarize(G(latent(batch, latent_bits, device), gain)).view(-1, 1, side, side).detach()
-    d_loss = F.relu(1 - D(real[idx])).mean() + F.relu(1 + D(fake)).mean()
+    d_loss = F.relu(1 - D(add_noise(real[idx]))).mean() + F.relu(1 + D(add_noise(fake))).mean()
     optD.zero_grad(set_to_none=True); d_loss.backward(); optD.step()
 
     fake = binarize(G(latent(batch, latent_bits, device), gain)).view(-1, 1, side, side)
     g_loss = -D(fake).mean()
     optG.zero_grad(set_to_none=True); g_loss.backward(); optG.step()
 
-    if step % 200 == 0 or step == 1:
-        print(f"step {step:5d} gain {gain:5.2f} d {d_loss.item():+.3f} g {g_loss.item():+.3f} "
-              f"{time.time() - started:6.1f}s")
+    with torch.no_grad():
+        for target, param in zip(ema_alpha, G.alpha):
+            target.mul_(ema_decay).add_(param.detach(), alpha=1 - ema_decay)
+        for target, param in zip(ema_beta, G.beta):
+            target.mul_(ema_decay).add_(param.detach(), alpha=1 - ema_decay)
+
+    if step % 1000 == 0 or step == 1:
+        print(f"step {step:6d} gain {gain:5.2f} d {d_loss.item():+.3f} g {g_loss.item():+.3f} "
+              f"{time.time() - started:6.1f}s", flush=True)
 
 import matplotlib.pyplot as plt
 
+# Sample from the EMA weights. G is left holding them, so the export cell below
+# snaps the EMA generator rather than the last noisy step.
 with torch.no_grad():
-    probs = G(latent(64, latent_bits, device), gain=32.0)
+    for p, e in zip(G.alpha, ema_alpha): p.copy_(e)
+    for p, e in zip(G.beta, ema_beta): p.copy_(e)
+    probs = G(latent(64, latent_bits, device), gain=gain_end)
     hard = (probs > 0.5).float().cpu().view(-1, side, side)
-    p = probs.cpu().view(-1, side, side)
 
 fig, axes = plt.subplots(4, 16, figsize=(16, 4))
 for i, ax in enumerate(axes.flat):
     ax.imshow(hard[i], cmap="gray", vmin=0, vmax=1)
     ax.axis("off")
 plt.tight_layout(); plt.show()
-print("mean probability:", round(p.mean().item(), 3), "(real data density ~0.45)")
+print("mean probability:", round(probs.mean().item(), 3), "(real data density ~0.42)")
 
 import json
 
