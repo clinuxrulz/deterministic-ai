@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onSettled, Repeat, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, onSettled, Repeat, Show } from "solid-js";
 import init, { ModelHandle, run_circuit } from "./wasm/pkg/xorae_wasm";
 import "./App.css";
 
@@ -36,6 +36,18 @@ async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+function bitsToHex(bits: Uint8Array): string {
+  let hex = "";
+  for (let i = 0; i < bits.length; i += 4) {
+    let value = 0;
+    for (let j = 0; j < 4 && i + j < bits.length; j += 1) {
+      value |= (bits[i + j] & 1) << j;
+    }
+    hex += value.toString(16);
+  }
+  return hex;
+}
+
 async function loadImage(url: string): Promise<HTMLImageElement> {
   const image = new Image();
   image.src = url;
@@ -67,8 +79,12 @@ function runImage(image: HTMLImageElement, model: ModelHandle): InferenceResult 
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
-  const [tab, setTab] = createSignal<"reconstruct" | "digits">(
-    params.get("tab") === "digits" ? "digits" : "reconstruct",
+  const [tab, setTab] = createSignal<"reconstruct" | "digits" | "gan">(
+    params.get("tab") === "digits"
+      ? "digits"
+      : params.get("tab") === "gan"
+        ? "gan"
+        : "reconstruct",
   );
   const [models, setModels] = createSignal<ModelEntry[]>([]);
   const [samples, setSamples] = createSignal<SampleEntry[]>([]);
@@ -141,19 +157,7 @@ export default function App() {
     return errors / a.length;
   });
 
-  const keyHex = createMemo(() => {
-    const bits = keyBits();
-    if (bits.length === 0) return "";
-    let hex = "";
-    for (let i = 0; i < bits.length; i += 4) {
-      let value = 0;
-      for (let j = 0; j < 4 && i + j < bits.length; j += 1) {
-        value |= (bits[i + j] & 1) << j;
-      }
-      hex += value.toString(16);
-    }
-    return hex;
-  });
+  const keyHex = createMemo(() => (keyBits().length === 0 ? "" : bitsToHex(keyBits())));
 
   function apply(result: InferenceResult, url: string) {
     setOriginal(result.bits);
@@ -309,9 +313,22 @@ export default function App() {
         >
           draw a digit
         </button>
+        <button
+          class={tab() === "gan" ? "tab active" : "tab"}
+          onClick={() => setTab("gan")}
+        >
+          cat gan
+        </button>
       </nav>
 
-      <Show when={tab() === "reconstruct"} fallback={<DigitLab />}>
+      <Show
+        when={tab() === "reconstruct"}
+        fallback={
+          <Show when={tab() === "digits"} fallback={<CatGan />}>
+            <DigitLab />
+          </Show>
+        }
+      >
       <p class="status">{status()}</p>
 
       <Show when={model()}>
@@ -970,6 +987,241 @@ function DigitLab() {
         <p class="hint">
           what the circuit sees · 28×28 thresholded pixels · stroke width is normalised
         </p>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Cat GAN tab: the generator is a wired NAND circuit, not a CNN with weights.
+// A random 96-bit latent is pushed through 2,304 gates and the 1,024 outputs
+// are drawn as a 32x32 image.
+//
+// It is a placeholder. The circuit reproduces cat-image statistics (density,
+// local texture) but not anatomy, and only about 15 of its 96 latent bits
+// change the output, so the grid shows large smooth blobs rather than cats.
+// `effective_latent` in gan/meta.json is that number, measured offline by
+// flipping each latent bit and counting changed outputs.
+// ---------------------------------------------------------------------------
+
+type GanMeta = {
+  side: number;
+  latent: number;
+  gates: number;
+  depth: number;
+  active_gates: number;
+  effective_latent: number;
+  dead_latent: number;
+  note: string;
+};
+
+const GAN_GRID = 4;
+const GAN_GAP = 2; // transparent gutter between tiles, in source pixels
+const GAN_ON = 232;
+const GAN_OFF = 11;
+
+/** Deterministic RNG for the headless self-test: same grid every load. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function CatGan() {
+  const params = new URLSearchParams(window.location.search);
+  let canvasRef: HTMLCanvasElement | undefined;
+  let circuitJson = "";
+  let timer: number | undefined;
+
+  const [info, setInfo] = createSignal<GanMeta | null>(null);
+  const [status, setStatus] = createSignal("loading generator circuit…");
+  const [auto, setAuto] = createSignal(false);
+  const [latentHex, setLatentHex] = createSignal("");
+  const [density, setDensity] = createSignal(0);
+  const [spread, setSpread] = createSignal(0);
+
+  const generate = (
+    meta: GanMeta,
+    rng: () => number = Math.random,
+  ): { density: number; spread: number } | null => {
+    const canvas = canvasRef;
+    if (!canvas || circuitJson === "") return null;
+
+    const tiles = GAN_GRID * GAN_GRID;
+    const samples: Uint8Array[] = [];
+    let firstLatent = new Uint8Array(meta.latent);
+    for (let t = 0; t < tiles; t += 1) {
+      const latent = new Uint8Array(meta.latent);
+      for (let i = 0; i < latent.length; i += 1) latent[i] = rng() < 0.5 ? 1 : 0;
+      if (t === 0) firstLatent = latent;
+      samples.push(run_circuit(circuitJson, latent));
+    }
+
+    const side = meta.side;
+    const step = side + GAN_GAP;
+    const full = step * GAN_GRID - GAN_GAP;
+    canvas.width = full;
+    canvas.height = full;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    const image = context.createImageData(full, full);
+    for (let t = 0; t < samples.length; t += 1) {
+      const ox = (t % GAN_GRID) * step;
+      const oy = Math.floor(t / GAN_GRID) * step;
+      const bits = samples[t];
+      for (let y = 0; y < side; y += 1) {
+        for (let x = 0; x < side; x += 1) {
+          const value = bits[y * side + x] === 1 ? GAN_ON : GAN_OFF;
+          const p = ((oy + y) * full + ox + x) * 4;
+          image.data[p] = value;
+          image.data[p + 1] = value;
+          image.data[p + 2] = value;
+          image.data[p + 3] = 255;
+        }
+      }
+    }
+    context.putImageData(image, 0, 0);
+
+    let ones = 0;
+    for (const sample of samples) {
+      for (const bit of sample) ones += bit;
+    }
+    const densityValue = ones / (samples.length * samples[0].length);
+
+    // Mean pairwise Hamming: 50% is unrelated, 0% is one image repeated.
+    let total = 0;
+    let pairs = 0;
+    for (let i = 0; i < samples.length; i += 1) {
+      for (let j = i + 1; j < samples.length; j += 1) {
+        let different = 0;
+        for (let k = 0; k < samples[i].length; k += 1) {
+          if (samples[i][k] !== samples[j][k]) different += 1;
+        }
+        total += different / samples[i].length;
+        pairs += 1;
+      }
+    }
+    const spreadValue = total / pairs;
+
+    setLatentHex(bitsToHex(firstLatent));
+    setDensity(densityValue);
+    setSpread(spreadValue);
+    return { density: densityValue, spread: spreadValue };
+  };
+
+  /** Buttons run after the scheduler has flushed, so the signal is current. */
+  const reroll = () => {
+    const meta = info();
+    if (meta) generate(meta);
+  };
+
+  const toggleAuto = () => {
+    if (timer !== undefined) {
+      window.clearInterval(timer);
+      timer = undefined;
+      setAuto(false);
+      return;
+    }
+    reroll();
+    timer = window.setInterval(reroll, 1500);
+    setAuto(true);
+  };
+
+  onCleanup(() => {
+    if (timer !== undefined) window.clearInterval(timer);
+  });
+
+  onSettled(() => {
+    void (async () => {
+      try {
+        const [metaJson, circuitText] = await Promise.all([
+          fetchJson<GanMeta>(asset("gan/meta.json")),
+          fetch(asset("gan/circuit.json")).then((response) => {
+            if (!response.ok) throw new Error(`gan/circuit.json: HTTP ${response.status}`);
+            return response.text();
+          }),
+        ]);
+        await wasmReady;
+        circuitJson = circuitText;
+        setInfo(metaJson);
+        setStatus(
+          `ready · ${metaJson.gates.toLocaleString()} NAND gates · ` +
+            `${metaJson.latent}-bit latent · depth ${metaJson.depth}`,
+        );
+        if (params.get("selftest") === "1") {
+          const stats = generate(metaJson, mulberry32(7));
+          setStatus(
+            `self-test · ${metaJson.gates} gates · ` +
+              `density ${((stats?.density ?? 0) * 100).toFixed(1)}% · ` +
+              `spread ${((stats?.spread ?? 0) * 100).toFixed(1)}%`,
+          );
+        } else {
+          generate(metaJson);
+        }
+      } catch (error) {
+        setStatus(`could not load the generator: ${String(error)}`);
+      }
+    })();
+  });
+
+  return (
+    <section class="ganlab">
+      <div class="gan-head">
+        <h2>This cat is not real.</h2>
+        <p class="hint">
+          2,304 literal NAND gates and 96 random bits. No weights are evaluated to make these images
+          — each tile is one latent, sampled fresh.
+        </p>
+      </div>
+
+      <div class="gan-panel">
+        <canvas ref={canvasRef} class="gancanvas" width={128} height={128} />
+        <div class="gan-actions">
+          <button class="sample" onClick={reroll}>
+            generate 16
+          </button>
+          <button class={auto() ? "sample on" : "sample"} onClick={toggleAuto}>
+            {auto() ? "stop" : "auto-roll"}
+          </button>
+        </div>
+        <p class="status">{status()}</p>
+      </div>
+
+      <div class="gan-side">
+        <div class="ganstats">
+          <div>
+            <span>gates</span>
+            <strong>{info() ? info()!.gates.toLocaleString() : "–"}</strong>
+          </div>
+          <div>
+            <span>latent</span>
+            <strong>{info() ? `${info()!.latent} bits` : "–"}</strong>
+          </div>
+          <div>
+            <span>depth</span>
+            <strong>{info()?.depth ?? "–"}</strong>
+          </div>
+          <div>
+            <span>density</span>
+            <strong>{(density() * 100).toFixed(1)}%</strong>
+          </div>
+          <div>
+            <span>spread</span>
+            <strong>{(spread() * 100).toFixed(1)}%</strong>
+          </div>
+          <div>
+            <span>live latent bits</span>
+            <strong>{info() ? `${info()!.effective_latent}/${info()!.latent}` : "–"}</strong>
+          </div>
+        </div>
+        <p class="hint">
+          latent <code class="ganhex">{latentHex()}</code>
+        </p>
+        <p class="hint">{info()?.note}</p>
       </div>
     </section>
   );

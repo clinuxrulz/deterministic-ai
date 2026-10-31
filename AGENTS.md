@@ -33,12 +33,26 @@ described by its wiring.
 It is the default entry in `web/public/models/index.json` and is verified in a
 headless browser (128 key bits, 8 samples, no JS errors).
 
-The demo has two tabs: **reconstruct** (the models above) and **draw a digit**
-(MNIST autoencoder + NAND classifier). The digit tab normalises a canvas stroke
-the way MNIST preprocessing does (bbox -> 20x20 -> centre of mass -> 28x28 ->
-nearest-upsample to 32x32), encodes it, and runs the classifier circuit from
+The demo has three tabs: **reconstruct** (the models above), **draw a digit**
+(MNIST autoencoder + NAND classifier) and **cat gan**. The digit tab normalises
+a canvas stroke the way MNIST preprocessing does (bbox -> 20x20 -> centre of
+mass -> 28x28), encodes it, and runs the classifier circuit from
 `web/public/digits/classifier.json` via `run_circuit`. `?tab=digits&selftest=1`
 draws a built-in sample and classifies it, which is how it is verified headlessly.
+
+The **cat gan** tab samples a 96-bit latent, runs the generator circuit from
+`web/public/gan/circuit.json` (2,304 NAND gates, depth 4) through `run_circuit`
+and draws 16 samples in a 4x4 grid, with a density and spread readout. It is a
+placeholder: the circuit reproduces cat-image statistics (density, local
+texture) but not anatomy, and only about 15 of its 96 latent bits change the
+output — `effective_latent` in `web/public/gan/meta.json`, measured by flipping
+each bit offline. The tab is titled "This cat is not real."; `?tab=gan&selftest=1`
+renders a deterministic grid for headless checks.
+
+Note for Solid 2.0: signal writes are scheduled, so reading a signal immediately
+after setting it returns the stale value. Pass values explicitly instead (the
+GAN tab's `generate(meta)` does this), or compute the display string from a
+local. This cost an afternoon of debugging a canvas that stayed empty.
 
 The demo also ships **`cats16-rgb2`** (2-bit colour, 64 colours, 192-bit key,
 2,345 gates), verified the same way: 192 key bits, `abs MAE 23.61%`, zero
