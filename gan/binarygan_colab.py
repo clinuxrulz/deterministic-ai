@@ -31,7 +31,10 @@ test = datasets.CIFAR10(root="./cifar", train=False, download=True, transform=tf
 
 def cats(dataset):
     images = torch.stack([img for img, label in dataset if label == 3])  # class 3 = cat
-    return (images[:, 0] >= 128 / 255).float()
+    # Keep the channel dimension: the discriminator is a Conv2d and
+    # needs (N, 1, H, W). Dropping it makes torch treat the batch as
+    # channels and raise 'expected input[1, 64, 16, 16] to have 1 channels'.
+    return (images >= 128 / 255).float()
 
 real = cats(train).to(device)
 real_test = cats(test).to(device)
@@ -126,6 +129,7 @@ for step in range(1, steps + 1):
     gain = 1.0 * (32.0 / 1.0) ** min(1.0, step / (0.85 * steps))
 
     idx = torch.randint(0, real.shape[0], (batch,), device=device)
+    assert real.shape[1:] == (1, side, side), f"real has shape {tuple(real.shape)}, expected (N, 1, {side}, {side})"
     fake = binarize(G(latent(batch, latent_bits, device), gain)).view(-1, 1, side, side).detach()
     d_loss = F.relu(1 - D(real[idx])).mean() + F.relu(1 + D(fake)).mean()
     optD.zero_grad(set_to_none=True); d_loss.backward(); optD.step()
