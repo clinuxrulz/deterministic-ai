@@ -33,6 +33,8 @@ flamegraph.svg
 !/web/public/models/cats16-threshold.json
 !/web/public/models/cats16-rgb1.json
 !/web/public/models/cats32-nand.json
+!/web/public/models/cats32-edge.json
+!/web/public/models/cats32-pal4.json
 /web/public/samples/*.png
 !/web/public/samples/toy-*.png
 !/web/public/samples/cat-*.png

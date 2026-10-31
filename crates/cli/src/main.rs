@@ -164,6 +164,11 @@ enum CliCommand {
         model: PathBuf,
         #[arg(long)]
         out: PathBuf,
+        /// Record how images were binarized, so the web demo preprocesses
+        /// uploads the same way. The dataset format does not store it, and the
+        /// trainer writes `threshold` by default.
+        #[arg(long)]
+        binarize: Option<String>,
     },
     /// Train a classifier on the encoder key (or raw pixels) and report accuracy.
     Classify {
@@ -662,8 +667,15 @@ fn main() -> Result<()> {
             println!("wrote {}", out.display());
             Ok(())
         }
-        CliCommand::Export { model, out } => {
-            let model = load_model(&model)?;
+        CliCommand::Export {
+            model,
+            out,
+            binarize,
+        } => {
+            let mut model = load_model(&model)?;
+            if let Some(mode) = binarize {
+                model.config.binarize = parse_binarize(&mode)?;
+            }
             let json = model.to_json().map_err(anyhow::Error::msg)?;
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;

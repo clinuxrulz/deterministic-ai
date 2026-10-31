@@ -26,6 +26,10 @@ type InferenceResult = {
 
 const base = import.meta.env.BASE_URL;
 
+/** Shared empty overlay: the input panel shows the bits as the circuit sees
+ * them, and only the reconstruction marks differences. */
+const NO_DIFF = new Uint8Array();
+
 function asset(path: string): string {
   return `${base}${path.replace(/^\//, "")}`;
 }
@@ -87,6 +91,7 @@ export default function App() {
         : "reconstruct",
   );
   const [models, setModels] = createSignal<ModelEntry[]>([]);
+  const [selectedId, setSelectedId] = createSignal("");
   const [samples, setSamples] = createSignal<SampleEntry[]>([]);
   const [model, setModel] = createSignal<ModelHandle | null>(null);
   const [status, setStatus] = createSignal("loading model index…");
@@ -176,6 +181,7 @@ export default function App() {
     await wasmReady;
     const handle = new ModelHandle(json);
     setModel(handle);
+    setSelectedId(entry.id);
     const summary =
       handle.color_mode === "grayscale"
         ? `val BER ${(handle.val_ber * 100).toFixed(2)}%`
@@ -255,7 +261,11 @@ export default function App() {
           return;
         }
         setModels(index.models);
-        const handle = await loadModel(index.models[0]);
+        // ?model=<id> deep-links a model, which is how the headless checks
+        // reach one that is not first in the list.
+        const wanted = params.get("model");
+        const entry = index.models.find((m: ModelEntry) => m.id === wanted) ?? index.models[0];
+        const handle = await loadModel(entry);
         try {
           const sampleIndex = await fetchJson<SampleIndex>(asset("samples/index.json"));
           setSamples(sampleIndex.samples);
@@ -291,7 +301,11 @@ export default function App() {
           >
             <For each={models()}>
               {(entry, index) => (
-                <option value={index()} title={entry.description}>
+                <option
+                  value={index()}
+                  selected={entry.id === selectedId()}
+                  title={entry.description}
+                >
                   {entry.name}
                 </option>
               )}
@@ -381,8 +395,8 @@ export default function App() {
               {(url) => <img class="preview" src={url()} alt="input" />}
             </Show>
           </div>
-          <Show when={isColor()} fallback={<BitGrid bits={original()} diff={diff()} />}>
-            <ColorGrid rgb={inputRgb()} diff={diffRgb()} />
+          <Show when={isColor()} fallback={<BitGrid bits={original()} diff={NO_DIFF} />}>
+            <ColorGrid rgb={inputRgb()} diff={NO_DIFF} />
           </Show>
         </article>
 

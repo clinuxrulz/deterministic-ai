@@ -54,6 +54,16 @@ after setting it returns the stale value. Pass values explicitly instead (the
 GAN tab's `generate(meta)` does this), or compute the display string from a
 local. This cost an afternoon of debugging a canvas that stayed empty.
 
+Two experiment entries sit next to the best model so the *targets* are
+legible: `cats32-edge` (Sobel line drawings, 15% ink; the trainer cannot fit
+them, see Checkpoint 10) and `cats32-pal4` (4-level grey, 2,048 bits,
+unstructured reconstruction). Selecting the edge model makes the input panel a
+clean line drawing, which is the point of shipping it: the reconstruction is
+noise and the demo says so. `?model=<id>` deep-links any entry, which is how
+the headless checks reach a model that is not first in the list. Models record
+their `binarize` mode, so the demo preprocesses uploads the same way
+(`xorae export --binarize edge` when the trainer wrote `threshold`).
+
 The demo also ships **`cats16-rgb2`** (2-bit colour, 64 colours, 192-bit key,
 2,345 gates), verified the same way: 192 key bits, `abs MAE 23.61%`, zero
 console errors. Loading it requires the rebuilt wasm bundle — an older one
