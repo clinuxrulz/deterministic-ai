@@ -1,0 +1,12 @@
+{
+  "name": "cats32 gan v2",
+  "side": 32,
+  "latent": 96,
+  "gates": 2304,
+  "outputs": 1024,
+  "depth": 4,
+  "active_gates": 2020,
+  "effective_latent": 15,
+  "dead_latent": 81,
+  "note": "Placeholder generator. The circuit reproduces cat-image statistics -- density and local texture -- but not anatomy: it learned large smooth blobs. Only about 15 of its 96 latent bits change the output, and flipping one usually changes nothing. No weights: every gate is a literal NAND."
+}
