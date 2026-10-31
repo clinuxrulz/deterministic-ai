@@ -47,6 +47,18 @@ pub struct EvalReport {
     /// these judge the strokes instead of the empty space.
     pub ones_f1: f32,
     pub ones_iou: f32,
+    /// Tolerant boundary scores (see `edge`): F1 at a 1.5 and 3.0 px radius,
+    /// and the mean chamfer distance in pixels. Only filled for square
+    /// single-channel batches.
+    pub edge_f1_near: f32,
+    pub edge_f1_far: f32,
+    pub edge_chamfer: f32,
+    /// Ink density of the target and of the reconstruction. A tolerant score
+    /// is only meaningful next to these: flooding the canvas raises recall.
+    pub edge_target_density: f32,
+    pub edge_pred_density: f32,
+    /// What the same score would be for random ink at the same density.
+    pub edge_chance_f1_near: f32,
     pub n: usize,
 }
 
@@ -170,6 +182,14 @@ fn report_from_planes_color(
         ber,
         ones_f1,
         ones_iou,
+        // Tolerant scores are evaluation-only: a distance transform per image
+        // is too slow for the evolutionary inner loop.
+        edge_f1_near: 0.0,
+        edge_f1_far: 0.0,
+        edge_chamfer: 0.0,
+        edge_target_density: 0.0,
+        edge_pred_density: 0.0,
+        edge_chance_f1_near: 0.0,
         color_mae,
         color_mse,
         psnr,
@@ -858,11 +878,18 @@ pub fn evaluate_model(model: &Model, dataset: &Dataset, indices: &[usize]) -> Re
     };
 
     let (ones_f1, ones_iou) = ones_scores(&recon, &batch);
+    let edge = crate::edge::batch_scores(&recon, &batch);
     Ok(EvalReport {
         fitness,
         ber,
         ones_f1,
         ones_iou,
+        edge_f1_near: edge.map(|e| e.f1_near).unwrap_or(0.0),
+        edge_f1_far: edge.map(|e| e.f1_far).unwrap_or(0.0),
+        edge_chamfer: edge.map(|e| e.chamfer).unwrap_or(0.0),
+        edge_target_density: edge.map(|e| e.target_density).unwrap_or(0.0),
+        edge_pred_density: edge.map(|e| e.pred_density).unwrap_or(0.0),
+        edge_chance_f1_near: edge.map(|e| e.chance_f1_near).unwrap_or(0.0),
         color_mae,
         color_mse,
         psnr,

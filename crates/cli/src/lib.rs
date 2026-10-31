@@ -7,6 +7,7 @@ pub mod baselines;
 pub mod classify;
 pub mod config;
 pub mod dataset;
+pub mod edge;
 pub mod ga;
 pub mod grad;
 pub mod nand;

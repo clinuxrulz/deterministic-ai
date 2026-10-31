@@ -392,6 +392,11 @@ Do not spend time re-running these.
   recognisable digits. `eval` now also prints **ones F1** and **ones IoU**
   (precision/recall over the set bits), which is what to compare when the
   target is sparse. On the shipped 32x32 model they are 0.783 / 0.643.
+- `eval` also prints **edge F1@1.5 vs chance** (a tolerance-aware boundary
+  score: chamfer distance transform, precision/recall within 1.5 px, averaged
+  over both directions). The chance column is not optional — at 32x32 with 15%
+  ink, random spray scores 0.56, so a bare 0.57 means nothing. The shipped
+  model is 0.889 vs 0.695 chance; the edge model is 0.574 vs 0.564.
 - **The 32x32 threshold target is an inkblot.** Rendering the binarized target
   next to the 32x32 grayscale original makes it obvious that a *perfect* model
   would still output blobs, so "does it look like a cat" cannot be the measure

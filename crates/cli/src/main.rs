@@ -625,11 +625,17 @@ fn main() -> Result<()> {
                 );
             } else {
                 println!(
-                    "{}: BER {:.4}, ones F1 {:.3}, ones IoU {:.3}, exact {:.2}%, key entropy {:.3}, active gates {} / AIG nodes {} ({} samples)",
+                    "{}: BER {:.4}, ones F1 {:.3}, ones IoU {:.3}, edge F1@1.5 {:.3} vs chance {:.3}, @3 {:.3} (chamfer {:.2} px, ink {:.2}->{:.2}), exact {:.2}%, key entropy {:.3}, active gates {} / AIG nodes {} ({} samples)",
                     split,
                     report.ber,
                     report.ones_f1,
                     report.ones_iou,
+                    report.edge_f1_near,
+                    report.edge_chance_f1_near,
+                    report.edge_f1_far,
+                    report.edge_chamfer,
+                    report.edge_target_density,
+                    report.edge_pred_density,
                     report.exact_rate * 100.0,
                     report.key_entropy,
                     report.active_gates,

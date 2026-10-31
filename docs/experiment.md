@@ -938,3 +938,43 @@ Incidental fixes: `--palette` panicked for any dataset with more than one image
 (`from_color_parts` called `rgb_to_gray` on the whole buffer rather than per
 row); `run_nand` now checks bit planes as `channels * bits_per_pixel`, which is
 what lets a palette dataset train at all.
+
+### Tolerance-aware scoring (the "off by one pixel" problem)
+
+A per-pixel rule calls a perfect drawing shifted one pixel F1 0.00 and BER 0.30
+-- indistinguishable from noise, and at 32x32 with 2 px strokes every edge is
+one pixel from being "wrong". `crates/cli/src/edge.rs` therefore scores edges
+the way the boundary-detection literature does: a two-pass (1, sqrt2) chamfer
+distance transform of both images, then precision/recall with a radius, plus
+the mean distance.
+
+Calibration on the edge test split (400 images), which is the important part:
+
+| prediction | F1@1.5 | chamfer (px) | ink |
+|---|---|---|---|
+| perfect target | 1.000 | 0.00 | 0.15 |
+| target shifted 1 px | **1.000** | 0.44 | 0.15 |
+| target dilated 1 px | 1.000 | 0.51 | 0.41 |
+| **random ink at 23%** | **0.564** | 2.20 | 0.23 |
+| all ones | 0.583 | 2.62 | 1.00 |
+| all zeros | 0.000 | -- | 0.00 |
+
+The radius does what it should for *structure*: a displaced or thickened
+drawing is perfect. But at this density a 1.5 px radius covers about half the
+canvas, so the score saturates -- random spray already reaches 0.56. The metric
+is only readable against that chance level, so `eval` prints it:
+
+| model | edge F1@1.5 | chance | skill over chance |
+|---|---|---|---|
+| threshold (shipped) | 0.889 | 0.695 | **+0.194** |
+| Sobel edge, trained | 0.574 | 0.564 | **+0.010** |
+
+So the edge model is 1% better than spraying ink at the same density: its
+stroke *placement* carries essentially no information either, and the tolerant
+metric agrees with the harsh one (ones F1 0.198) from a different direction.
+The threshold model, by contrast, is 19 points above chance.
+
+Lesson for any future tolerant metric here: never report F1@r without the
+same-density random baseline, and prefer the smallest radius that still
+forgives the cable's own quantisation (~1 px), because F1@r rises with r for
+*any* predictor that inks enough.
