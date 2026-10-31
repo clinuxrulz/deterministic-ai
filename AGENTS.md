@@ -271,6 +271,7 @@ cargo run --release -p xorae -- export \
 | `crates/cli/src/ga.rs` | Genetic algorithm, fitness, evaluation |
 | `crates/cli/src/dataset.rs` | CIFAR loader, planar fix, `XAE4` format, palette/colour modes |
 | `crates/wasm/src/lib.rs` | `wasm-bindgen` bridge |
+| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder` modes |
 | `web/src/App.tsx` | Solid 2.0 UI |
 
 ## How the NAND trainer works
@@ -327,6 +328,25 @@ overlapping 3×3 windows. `configs/cats4_rgb8_wide.toml` starts at 768 for a
 384-bit input and is the best 4×4 colour run (0.2319 abs MAE) — still behind a
 constant mean image, so the mechanism exists but the target does not follow.
 
+## SAT wiring search
+
+`scripts/sat_ae.py` asks the trainer's question exactly, with a solver instead
+of gradients: fixed hierarchical shape, two binary-encoded candidate indices per
+gate, the whole net unrolled once per training pattern, and optional soft
+outputs (`--slack K` = at most K wrong bits *per pattern*, via selectors that
+are true exactly when a bit is wrong, plus a sequential counter). Kissat 4.0.1
+solves the 163-gate, 8-pattern 8×8 glyph instance (27k clauses) in 0.1 s, so it
+is a usable oracle, not a research toy; CaDiCaL 3.0 agrees on every CNF.
+
+Validation is built in and is not optional: `--mode selftest` generates a random
+wiring, lets it define the targets, and requires the solver to find one (a
+witness exists by construction); `--mode brute` enumerates every wiring on a
+tiny shape and compares SAT/UNSAT; `--mode encoder`/`decoder` attribute an UNSAT
+to one half of the net. Three bugs were caught this way, including a
+one-directional soft-equality clause that made every slack bound unbindable
+while still returning "SAT". Do not quote an UNSAT without selftest + brute
+agreement.
+
 ## What has been ruled out (with evidence)
 
 Do not spend time re-running these.
@@ -354,6 +374,7 @@ Do not spend time re-running these.
 | Gödel `min` as the default | Better at equal training budget (−0.0089 over 10 seeds) but much worse at equal size: pruned to 1,400 gates it scores 0.2154 vs 0.1811 for product (0/5 seeds win). Its extra gates are load-bearing |
 | **24-bit RGB (`--rgb8`)** | 16×16: abs MAE **0.2120** vs mean image 0.2031 (16,128 gates). 4×4: **0.2382** vs 0.1665 (1,008 gates). Cannot memorise 100 images either (train BER 0.3839 at 16×16 after ~18,700 updates, vs 0.1741 for grayscale). Half the planes are noise — see Checkpoint 11 |
 | 4×4 with more rate / mixing / depth / width | Key 48→96→192: abs MAE 0.2411 / **0.2325** (BER falls 0.4425→0.4110, but the gain is entirely in the noise planes). Cross-plane candidates: 0.2396. Same-resolution layers (8 levels instead of 4): 0.2764, same memorisation number (0.4130). Overcomplete first layer (3,312 gates, 5 levels per side): 0.2319, best of the family, 2.6× the gates for 0.006 MAE and memorisation 0.3977. Nothing approaches the 0.1665 bar |
+| SAT-solved wiring on 8×8 glyphs (`scripts/sat_ae.py`) | Kissat 4.0.1 proves the trainer's template `64→32→16→3→16→32→64` (163 gates) fits 1–3 glyphs exactly and is **UNSAT at 4**, in 0.1 s (CaDiCaL 3.0 agrees). Not the key size and not the encoder: a 3-bit key separates all 8 glyphs, but the 3-level decoder computes only `(u∧v)∨(s∧t)` over six functions of the key, and no such bit can be set in exactly one of four glyphs. Deeper/wider decoders and a 4-bit key change nothing. Exact fit tops out at 3 of 8; slack 4 wrong bits per pattern is SAT, 2 is UNSAT |
 
 ## Open threads, in priority order
 
@@ -409,6 +430,15 @@ Do not spend time re-running these.
    established. Re-measure the colour and wide configs the same way (5 seeds,
    paired) rather than as single runs — otherwise they repeat the `gain_end`
    mistake.
+8. **SAT as an exact oracle (Checkpoint 12).** The encoder answers "is this
+   template feasible?" in 0.1 s on 8×8 glyphs, and it already says the
+   trainer's depth-3 decoder cannot fit four patterns. Unmeasured: the minimum
+   gate count for an exact fit at 8 patterns (a shape search, not a solver
+   problem), whether a SAT-found circuit generalises to held-out glyphs,
+   whether an *encoder* with full mixing between same-size layers fixes the
+   saturation, and whether the same question is answerable at 32×32 (64→32→16→8
+   with 128-bit keys would be ~10⁵ clauses per pattern — likely fine for SAT,
+   and it would say outright whether the shipped shape can fit 8 CIFAR cats).
 
 ## Gotchas
 

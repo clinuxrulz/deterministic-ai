@@ -1192,3 +1192,190 @@ RAYON_NUM_THREADS=2 cargo run --release -p xorae -- train-nand \
   --config configs/cats4_rgb8.toml --data data/cats4_rgb8.bin \
   --out runs/rgb8_4x4_fit100 --epochs 12000 --train-limit 100
 ```
+
+## Checkpoint 12 (2026-10-31): choosing the wiring with a SAT solver
+
+Every trainer in this repo searches wiring with gradients: softmax distributions
+over candidate wires, annealed until one choice per gate wins. That is a local
+search on a non-convex objective, so it can only ever report "this is the best I
+found". A SAT solver answers the exact question instead: given the same fixed
+hierarchical shape, does *any* choice of two candidate wires per gate reproduce
+the training set? The answer is either a witness (a circuit, with a guarantee
+that it fits) or a proof that no such circuit exists inside that template.
+
+This checkpoint is about whether that is feasible, not about beating the
+trainer. Two things came out of it: SAT is fast enough to use as an oracle, and
+it settles an argument that the gradient runs could only hint at -- the
+*hierarchical template itself* is the limiting factor, and on the smallest task
+in the repository it stops working at four patterns.
+
+### What was built
+
+`scripts/sat_ae.py` -- a DIMACS encoder, solver driver, and simulator/verifier.
+Pure Python, no library dependency. Tested with Kissat 4.0.1 and CaDiCaL 3.0
+(both built from source; the 2025 SAT Competition main track was won by a Kissat
+variant, AE-Kissat-MAB, so Kissat is the right default).
+
+Encoding, for a shape given as layer widths:
+
+- **Wiring.** Each gate's two inputs are indices into its candidate window, binary
+  encoded. Candidate lists are padded to a power of two by repeating the last
+  entry -- with an unused code the solver could leave a gate's inputs
+  unconstrained and fabricate outputs without reading the key.
+- **Gates.** `out = NAND(in_a, in_b)` as three Tseitin clauses, and each input
+  selected by an if-then chain over the index codes.
+- **Patterns.** The whole net is unrolled once per training pattern, so the CNF
+  is a single circuit with a copy per example and the wiring variables are
+  shared. Nothing else is free.
+- **Loss.** `--slack K` makes each output equality soft: a selector per bit that
+  is true *exactly* when the bit is wrong, bounded by a sequential-counter
+  cardinality constraint, per pattern. So `slack 2` means "at most two wrong
+  bits in each image", and one bad pattern cannot absorb the budget for the
+  others.
+- **Modes.** `full` (autoencoder), `encoder` (can the key separate the
+  patterns?), `decoder` (given distinct free keys, can the decoder draw the
+  patterns?), `selftest`, `brute`.
+
+The task is 8x8 bitmaps of the letters A-H (64 bits each), in the trainer's
+template: `64 -> 32 -> 16 -> 3 -> 16 -> 32 -> 64`, 163 NAND gates, 3-bit key.
+That is 1,139 variables and 3,891 clauses for one pattern; 4,562 and 26,578 for
+all eight.
+
+### Validation before any claim
+
+An encoder for this problem is easy to make subtly wrong -- and a wrongly
+over-constrained CNF produces confident, false UNSATs. Four checks:
+
+1. **Round-trip selftest.** Generate a random wiring, let *it* define the
+   targets, then ask the solver for a wiring. A witness exists by construction,
+   so the instance must come back SAT and the model must reproduce the targets.
+   Passes at 1, 2, 3, 4 and 8 patterns.
+2. **Brute force.** On tiny shapes every wiring can be enumerated. `[2,2,4]`
+   (6 gates, 4,096 wirings) and `[2,4,4]` (8 gates) agree with the solver on
+   15/15 random instances, both SAT and UNSAT. This is the check that rules out
+   a silently over-constrained encoding.
+3. **Encoder alone.** Asked only to put the patterns on distinct keys, a 3-bit
+   key separates all eight glyphs (exactly at capacity, 8 codes for 8 patterns).
+   So an UNSAT is never the encoder's fault at these sizes.
+4. **Two solvers.** Kissat and CaDiCaL agree on every CNF that was kept.
+
+Three real bugs were found this way, which is the argument for the checks:
+
+- **The soft-equality clause was one-directional.** `sel -> (out = target)` with
+  no converse lets the solver leave every selector false, so the cardinality
+  bound never binds. Every slack run reported BER 0.4844 with 31 wrong bits per
+  pattern at `slack 1`. The fix is `sel <-> (out != target)`, and the runner now
+  asserts that no pattern exceeds its budget.
+- **`separate()` indexed the wrong layer** (the 64-bit output instead of the
+  3-bit key), so the "can the encoder separate" question was being asked of the
+  decoder's output.
+- **The decoder-only test pinned key `000`.** The decoder has no bias inputs, so
+  a constant key constant-folds every gate: `000` always decodes to all-ones.
+  Keys have to be free-but-distinct, and *which* codes are usable is part of the
+  problem.
+
+### Exact fit stops at three glyphs
+
+| glyphs | result | time |
+|---|---|---|
+| 1 | SAT, 0 wrong bits | 0.1 s |
+| 2 | SAT, 0 wrong bits | 0.1 s |
+| 3 | SAT, 0 wrong bits | 0.1 s |
+| 4 | **UNSAT** | 0.1 s |
+| 5, 6, 8 | **UNSAT** | 0.1 s |
+
+0.1 s is not a timeout, it is the full proof. Widening the key to 4 bits does
+not help (also UNSAT at four patterns), and neither does anything I did to the
+decoder: extra same-resolution layers (which are the only *fully mixing* layers
+in this scheme, since a same-size layer's candidate window is the whole previous
+layer) up to five of them, nor 32-wide layers, nor a 7-layer decoder. The
+encoder is not the constraint either -- it separates all eight glyphs.
+
+### Why four glyphs is impossible, and why it is not the solver
+
+For a decoder of three NAND levels the output bit has a closed form. Level 1
+computes `¬(k_i ∧ k_j)` or `¬k_i` for a pair of key bits; level 2 computes
+`¬(u ∧ v)` over those; level 3 computes `¬(A ∧ B)` over level-2 values, which is
+
+    out = (u ∧ v) ∨ (s ∧ t)
+
+with each of `u, v, s, t` one of the six functions
+`{¬k0, ¬k1, ¬k2, ¬(k0k1), ¬(k0k2), ¬(k1k2)}`. Every such conjunct covers at
+least two of the eight key codes (each of the six sets holds 4 or 6 of the 8
+codes, and their pairwise intersections never drop below 2), so no output bit
+can be true at exactly one key code. But glyph A has such a bit: row 4, column 2 is set in A
+and clear in B, C and D. So four glyphs cannot be decoded by three NAND levels,
+for any key assignment. That matches the solver's UNSAT exactly.
+
+This is the useful part of the result. The gradient trainer would have reported
+"BER 0.19 after 200 epochs" and nobody could say whether the wiring, the
+optimiser, or the template was to blame. SAT says: the template. The decoder has
+no bias inputs, three levels, and a shared node pool, and that is not enough to
+express "one bit set in exactly one of four images".
+
+### Slack: what a little loss buys
+
+Minimum wrong bits per pattern, per glyph count (`--slack`), full autoencoder,
+3-bit key:
+
+| glyphs | slack 0 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| 4 | UNSAT 0.2 s | UNSAT 7.6 s | SAT 8.9 s | SAT 2.3 s | SAT 0.8 s |
+| 8 | UNSAT 0.3 s | -- | UNSAT 59 s | timeout 60 s | SAT 1.1 s |
+
+So the answer to "can I allow a little loss" is yes, and it is quantified: with
+four glyphs, two wrong bits per image is still provably impossible and four is
+enough; with eight, four is impossible and sixteen works. Note what slack buys
+and what it does not: it makes the instance easy (all the SAT rows are under a
+second) because the solver may now pick a degenerate constant circuit *if* the
+budget allows it, which is why the per-pattern bound has to be small enough that
+a constant cannot pass.
+
+### What this establishes
+
+- **SAT is a usable oracle at this scale.** 163 gates, 8 patterns, 27k clauses,
+  exact answer in 0.1 s. Nothing here is near a solver limit; the interesting
+  limits are shape, not size.
+- **The template is the binding constraint, and it breaks early.** Three glyphs
+  out of eight, on the smallest task in the repo. That is the same hierarchical
+  wiring (local windows, 2^depth dependency cap) that the 32x32 model uses.
+- **Infeasibility is cheap to prove and expensive to guess.** The gradient
+  trainer's failure on a shape looks identical to an optimiser problem; the SAT
+  answer distinguishes them in a tenth of a second.
+
+Untested, and the obvious next questions: a template that is actually feasible
+for eight glyphs (what is the minimum gate count for an exact fit?), whether
+SAT-found circuits generalise to held-out glyphs or just memorise, and whether a
+32x32-ish shape of the trainer's design is feasible at all for a handful of
+images. The encoder is general over layer widths, so those are all one flag away.
+
+### Reproduce
+
+```bash
+# solver (outside the repo; Kissat 4.0.1)
+curl -sL -o kissat.tar.gz https://github.com/arminbiere/kissat/archive/refs/tags/rel-4.0.1.tar.gz
+tar xzf kissat.tar.gz && cd kissat-rel-4.0.1 && ./configure && make -j4
+
+K=$PWD/build/kissat
+
+# validation first: never trust the UNSATs without these
+python3 scripts/sat_ae.py --solver $K --mode selftest
+python3 scripts/sat_ae.py --solver $K --mode brute --shape 2,2,4 --patterns 3
+python3 scripts/sat_ae.py --solver $K --mode brute --shape 2,4,4 --patterns 3
+
+# the exact-fit frontier
+for n in 1 2 3 4 8; do
+  python3 scripts/sat_ae.py --solver $K --patterns $n --timeout 60
+done
+
+# which half of the net is the limit
+for n in 3 4 8; do
+  python3 scripts/sat_ae.py --solver $K --mode encoder --patterns $n
+  python3 scripts/sat_ae.py --solver $K --mode decoder --patterns $n
+done
+
+# smaller decoder/impossible-by-construction checks
+python3 scripts/sat_ae.py --solver $K --patterns 8 --slack 4   # UNSAT
+python3 scripts/sat_ae.py --solver $K --patterns 8 --slack 16  # SAT
+```
+
