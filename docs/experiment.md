@@ -1675,8 +1675,7 @@ Untested, and the obvious next questions: what shape *is* feasible for eight
 glyphs (the function-count measurement above says it needs either more key bits
 or same-resolution mixing in the decoder -- the encoder is general over layer
 widths, so this is a shape search, not a solver problem); what the `mix` gate
-does at eight glyphs (the run was abandoned rather than timed out, so it is an
-open number, not a negative); whether a two-or-three-type gate library -- the
+does at eight glyphs (300 s timeout, so it is an open number, not a negative); whether a two-or-three-type gate library -- the
 transistor-level question -- beats one fixed gate per device; and whether a
 32x32-ish shape of the trainer's design is feasible for a handful of images.
 The cone measurement above is the 32x32 answer in the form that is computable,

@@ -416,8 +416,9 @@ free type bit per gate (`NAND(a,b)` or `XOR(a,b) XOR bias`) takes the same
 `3→16→32→64` decoder from 16 functions of a 3-bit key to **134 of 256**, and from
 "four glyphs UNSAT" to **"four glyphs exact in 0.8 s"**. So the 16-of-256 wall is
 mostly the *gate*, not the template; the shape still bounds it (134, not 256)
-but "the template is the limit" was too coarse. Eight glyphs under `mix` was
-abandoned, not timed out — do not quote it.
+but "the template is the limit" was too coarse. Eight glyphs under `mix` timed
+out at 300 s, so that number is unmeasured rather than negative — do not quote
+it as either.
 
 ## What has been ruled out (with evidence)
 
