@@ -409,7 +409,8 @@ AND by spending a gate in the *next* layer — but the output layer has no next
 layer, which is exactly the resource the depth-3 decoder was missing. Measured:
 **58 of 256** functions of a 3-bit key (NAND: 16), exact fit for **1–6 glyphs**
 (NAND: 1–3; six in 6.1 s), **every subset of six or fewer** (70/70 at four,
-56/56 at five, 28/28 at six, against NAND's 1 of 70 at four), and at eight
+56/56 at five, 28/28 at six, against NAND's 1 of 70 at four) and 2 of the 8
+seven-glyph subsets, and at eight
 glyphs the minimum slack is **1 wrong bit per pattern** — BER **0.0156**,
 8 wrong bits in 512 — against NAND's slack 8 and BER 0.1172 (60 bits). Same
 shape, same 163 gates. It is not free in silicon: an AND cell is a NAND plus an

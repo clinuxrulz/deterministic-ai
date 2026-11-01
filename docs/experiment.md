@@ -1568,12 +1568,15 @@ which is exactly what the depth-3 decoder is short of.
 Measured, on the same 163-gate shape:
 
 - decoder functions of a 3-bit key: **58 of 256** (NAND 16, XOR+bias 8);
-- exact fit for **1-6 glyphs** (NAND stops at 3; six takes 6.1 s). Every subset
-  of six or fewer fits: 70/70 at four glyphs, 56/56 at five, 28/28 at six, and
-  the seven-glyph prefix is UNSAT in 43.8 s where NAND cannot fit four of the
-  prefix at all. The enumeration is `--mode subsets`, so these are counts over
-  all subsets rather than samples of the prefix;
-- the same 70 four-glyph subsets that NAND fits **1 of** fit **70 of** here;
+- exact fit for **1-6 glyphs** (NAND stops at 3; six takes 6.1 s), and not just
+  the prefix: **every** subset of six or fewer fits -- 70/70 at four glyphs,
+  56/56 at five, 28/28 at six -- where NAND fits **1 of the 70** at four. The
+  enumeration is `--mode subsets`, so these are counts over all subsets rather
+  than samples of the alphabetical one;
+- at seven glyphs **2 of the 8 subsets** fit exactly (`ABCDEGH` in 209 s,
+  `ABCDFGH` in 180 s); the other six, the prefix included, are UNSAT in
+  12-80 s. So seven is a coin-flip on which glyphs you drop, not a wall: the
+  same data-dependent margin NAND shows at four, one glyph later;
 - at eight glyphs the minimum slack is **1 wrong bit per pattern**, BER
   **0.0156** -- 8 wrong bits out of 512 -- found in 485 s.
 
@@ -1590,7 +1593,9 @@ Frontier, exact fit (slack 0):
 | NAND | SAT | SAT | SAT | UNSAT\* | UNSAT | UNSAT | UNSAT | UNSAT |
 | NAND or AND | SAT | SAT | SAT | SAT | SAT, 1.2 s | SAT, 6.1 s | UNSAT, 43.8 s | UNSAT, 20.4 s |
 
-\* the four-glyph *prefix* only: CEFG does fit, which is the one subset of 70.
+\* prefix only, and the margin is data-dependent even there: CEFG fits four
+glyphs, and at seven 2 of the 8 subsets fit. The prefix is one sample, which is
+what `--mode subsets` exists to fix.
 
 Slack at eight glyphs (minimum wrong bits per pattern; BER is the witness found
 at that bound):
