@@ -1449,6 +1449,45 @@ solver's. A SAT witness is therefore not necessarily reachable by the trainer,
 and these numbers are a sanity check on the feasibility claim, not a race
 between the two methods.
 
+### The shipped model has the same shape problem
+
+The 16-of-256 count cannot be enumerated for a 128-bit key (there are
+2^(2^128) functions to ask about), but the *cone* can be computed exactly from
+the exported JSON: the set of key bits an output bit can possibly depend on.
+That is an upper bound on what it can express, and the same bound that made the
+glyph decoder 16-wide.
+
+| model | encoder inputs read | decoder key bits live | cone per output (median / max) | outputs seeing ≤1 key bit |
+|---|---|---|---|---|
+| `cats32-nand` | **362 / 1,024** | 102 / 128 | 2 / 7 | 169 |
+| `cats16-rgb2` | **519 / 1,536** | 181 / 192 | 2 / 7 | 373 |
+| `mnist32` | **222 / 1,024** | 113 / 128 | 2 / 7 | 233 |
+| the glyph witness (3-bit key) | 10 / 64 | 3 / 3 | 3 / 3 | 10 |
+
+Two numbers here are not about the key at all:
+
+- **The encoder does not read most of the image.** 362 of 1,024 pixels can
+  affect the key in the shipped model -- 65% of the input is invisible, and on
+  MNIST it is 78%. The wiring search spends its gates on negation and on a few
+  strong inputs (`Nand(x,x)` is 42% of the gates), so the rest of the picture
+  never reaches the bottleneck.
+- **The decoder is local in the key too.** With three decoder levels the cone is
+  capped at `2^3 = 8` key bits; the measured maximum is 7 and the median is 2.
+  169 output bits depend on exactly one key bit, so at those pixels the decoder
+  is a copy or a negation, no matter what else the key says.
+
+This is consistent with the checkpoint 11 conclusion and with the ruled-out
+"more capacity" rows: adding gates to this template adds *depth-limited* gates.
+It is also the strongest argument so far for the two structural fixes on the
+open list — free inversions (so the budget is not half spent on NOT) and
+same-resolution layers (so a window can read across the picture instead of
+inside one column).
+
+The caveat cuts both ways: cone size is necessary, not sufficient. The glyph
+decoder sees all 3 key bits and still computes only 16 of 256 functions, so a
+large cone does not imply expressiveness — but a cone of 1 certainly does cap
+it.
+
 ### What this establishes
 
 - **SAT is a usable oracle at this scale.** 163 gates, 8 patterns, 27k clauses,
@@ -1470,12 +1509,11 @@ between the two methods.
 Untested, and the obvious next questions: what shape *is* feasible for eight
 glyphs (the function-count measurement above says it needs either more key bits
 or same-resolution mixing in the decoder -- the encoder is general over layer
-widths, so this is a shape search, not a solver problem); whether a 32x32-ish
-shape of the trainer's design is feasible for a handful of images; and whether
-the 16-of-256 measurement reproduces on the shipped 32x32 decoder, where each
-output bit's cone covers more key bits so the function count should be far
-larger -- if it is not, the template is the explanation for the 0.17 BER plateau
-rather than capacity.
+widths, so this is a shape search, not a solver problem); and whether a
+32x32-ish shape of the trainer's design is feasible for a handful of images.
+The cone measurement above is the 32x32 answer in the form that is computable,
+and it is unfriendly: the decoder's median output sees two key bits and the
+encoder ignores two thirds of the image.
 
 ### Reproduce
 
@@ -1509,6 +1547,10 @@ python3 scripts/sat_ae.py --solver $K --patterns 8 --slack 8   # SAT, ~5 min
 # how many functions of the key the decoder can compute (3-bit keys only)
 python3 scripts/sat_ae.py --solver $K --mode functions --shape 3,16,32,64
 python3 scripts/sat_ae.py --solver $K --mode functions --shape 3,16,16,16,16,16,32,64
+
+# what each output bit can possibly depend on (the ceiling on expressiveness)
+python3 scripts/circuit_cones.py web/public/models/cats32-nand.json \
+  web/public/models/mnist32.json web/public/sat/circuit.json
 
 # export the 3-glyph witness as browser circuits for the demo's SAT tab
 python3 scripts/sat_ae.py --solver $K --patterns 3 --export web/public/sat

@@ -284,6 +284,7 @@ cargo run --release -p xorae -- export \
 | `crates/cli/src/dataset.rs` | CIFAR loader, planar fix, `XAE4` format, palette/colour modes |
 | `crates/wasm/src/lib.rs` | `wasm-bindgen` bridge |
 | `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions` modes |
+| `scripts/circuit_cones.py` | exact dependency cones of every wire: what an output *can* depend on |
 | `scripts/make_glyph_dataset.py` | writes the 8×8 glyphs as `XAE4` so `train-nand` can train on the same data |
 | `web/src/App.tsx` | Solid 2.0 UI |
 
@@ -374,8 +375,15 @@ SAT witness is not necessarily reachable by it.
 `--export web/public/sat` writes a witness as two plain `Circuit` JSON objects
 plus `meta.json`, and the exporter re-simulates them on every glyph before
 saving, so a broken export fails loudly instead of shipping. That is what the
-demo's *solver's wiring* tab runs; regenerate it with
+demo's *solver's-wiring* tab runs; regenerate it with
 `python3 scripts/sat_ae.py --patterns 3 --export web/public/sat`.
+
+`scripts/circuit_cones.py` computes what each output of an exported circuit can
+possibly depend on (union the two inputs' dependency sets at every gate). The
+answer for the shipped 32×32 model is hostile: every decoder output sees at most
+7 of the 128 key bits (median 2, 169 outputs see exactly one), and the encoder
+reads only **362 of 1,024** input pixels. That is the same ceiling as the glyph
+result, in a form that can be measured at any key size.
 
 ## What has been ruled out (with evidence)
 
@@ -425,13 +433,16 @@ Do not spend time re-running these.
    well as real keys (0.806 vs 0.801) while decoding to recognisable digits.
    Next steps if this is the direction: a nonlinear/RNN prior should cut the
    NLL further, and a GAN on keys is now defensible rather than speculative.
-3. **Capacity per gate is the binding constraint.** Two independent
+3. **Capacity per gate is the binding constraint.** Three independent
    measurements: the model cannot fit 100 images (train BER 0.1741 ≈ the 4,000
-   image result), and train/val/test BER are all equal. Objective tweaks do not
-   help (see the ruled-out table). The levers left are what a gate is spent on:
-   free inversions (42% of gates are `Nand(x,x)`), spatial weight sharing, and
-   distillation from a CNN teacher. A margin/hinge loss on bit decisions is the
-   one cheap objective variant not yet tried.
+   image result); train/val/test BER are all equal; and the wiring is spread so
+   thinly that the encoder reads only **362 of 1,024** input pixels while the
+   decoder's median output bit depends on 2 of the 128 key bits
+   (`scripts/circuit_cones.py`). Objective tweaks do not help (see the ruled-out
+   table). The levers left are what a gate is spent on: free inversions (42% of
+   gates are `Nand(x,x)`), spatial weight sharing, and distillation from a CNN
+   teacher. A margin/hinge loss on bit decisions is the one cheap objective
+   variant not yet tried.
 4. **Colour, 2 bits/channel: shipped; 24-bit: ruled out.** `--rgb2` gives 64
    colours as six bit planes (1,536 bits, 192-bit key, 8×); over six paired
    seeds it cuts absolute reconstruction error by 33.7% for 1.91× the gates. It
