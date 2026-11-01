@@ -1322,8 +1322,8 @@ function CatGan() {
 // ---------------------------------------------------------------------------
 // Glyph GAN tab: a *generator*, not an autoencoder.
 //
-// `scripts/sat_ae.py --mode generate --gate nandinv --letters 26 --distance 4`
-// asks for a circuit that turns a 6-bit latent into an 8x8 image, where
+// `scripts/sat_ae.py --mode generate --gate nandinv --letters 26 --distance 3`
+// asks for a circuit that turns an 8-bit latent into an 8x8 image, where
 // "an image" is a hand-written predicate: ink in the alphabet's range, every
 // row and column inked, no isolated pixel, every horizontal ink run one of the
 // lengths the alphabet itself uses (2, 3, 4, 5 or 8, calibrated from GLYPHS),
@@ -1472,9 +1472,9 @@ function GlyphGan() {
       <div class="gan-head">
         <h2>A typeface nothing asked for.</h2>
         <p class="hint">
-          The solver was given a {meta()?.key_bits ?? 6}-bit latent and a rule for what a letter looks like, and it chose
-          the wiring of {meta()?.gates ?? 1082} gates that satisfies it. All 26 letters are pinned to A through
-          Z; the other {meta() ? meta()!.codes.length - 26 : 38} satisfy the same rule and are
+          The solver was given an {meta()?.key_bits ?? 8}-bit latent and a rule for what a letter looks like, and it chose
+          the wiring of {meta()?.gates ?? 3765} gates that satisfies it. All 26 letters are pinned to A through
+          Z; the other {meta() ? meta()!.codes.length - 26 : 230} satisfy the same rule and are
           not in the alphabet. Every tile below is drawn by running the circuit.
         </p>
       </div>

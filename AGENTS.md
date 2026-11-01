@@ -51,14 +51,14 @@ each bit offline. The tab is titled "This cat is not real."; `?tab=gan&selftest=
 renders a deterministic grid for headless checks.
 
 The **glyph gan** tab is a *generator* rather than an autoencoder: `--mode
-generate` in `scripts/sat_ae.py` produces a circuit that turns a 6-bit
+generate` in `scripts/sat_ae.py` produces a circuit that turns an 8-bit
 latent into an 8x8 image satisfying a predicate (ink range, every row and column
 inked, no isolated pixel, every horizontal ink run a length the alphabet uses,
-at least 4 bits from every real glyph). All 26 letters (A-Z) of the alphabet
-are pinned; the remaining codes are the variants. `web/public/gan8/` holds the 1,082-gate circuit and
+at least 3 bits from every real glyph). All 26 letters (A-Z) of the alphabet
+are pinned; the remaining codes are the variants. `web/public/gan8/` holds the 3,765-gate circuit and
 its metadata, and every tile is drawn by running the circuit, not by reading the
-JSON, so `?tab=glyphs&selftest=1` prints `self-test · 64/64 codes reproduce ·
-26/26 letters exact · 1082 gates`. The tab is titled "A typeface nothing asked
+JSON, so `?tab=glyphs&selftest=1` prints `self-test · 256/256 codes reproduce ·
+26/26 letters exact · 3765 gates`. The tab is titled "A typeface nothing asked
 for." and renders one row per letter with the real letter followed by typeface
 variants.
 
