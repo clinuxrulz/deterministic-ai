@@ -12,9 +12,10 @@ image bits ──▶ encoder (gates) ──▶ K-bit key ──▶ decoder (gate
 
 ## Live demo
 
-<https://clinuxrulz.github.io/deterministic-ai/> — two tabs: reconstruct an
-image from its key, or draw a digit and have a 392-gate NAND circuit classify
-it. Published from `main` by `.github/workflows/gh-pages.yml`.
+<https://clinuxrulz.github.io/deterministic-ai/> — four tabs: reconstruct an
+image from its key, draw a digit and have a 392-gate NAND circuit classify it,
+sample a cat GAN, or walk the key space of a circuit whose wiring a SAT solver
+chose. Published from `main` by `.github/workflows/gh-pages.yml`.
 
 ## Current best
 
