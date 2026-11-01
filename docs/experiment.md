@@ -1265,7 +1265,7 @@ over-constrained CNF produces confident, false UNSATs. Four checks:
    So an UNSAT is never the encoder's fault at these sizes.
 4. **Two solvers.** Kissat and CaDiCaL agree on every CNF that was kept.
 
-Three real bugs were found this way, which is the argument for the checks:
+Four real bugs were found this way, which is the argument for the checks:
 
 - **The soft-equality clause was one-directional.** `sel -> (out = target)` with
   no converse lets the solver leave every selector false, so the cardinality
@@ -1285,6 +1285,12 @@ Three real bugs were found this way, which is the argument for the checks:
   a constant key constant-folds every gate: `000` always decodes to all-ones.
   Keys have to be free-but-distinct, and *which* codes are usable is part of the
   problem.
+- **The XOR parity clauses forbade the wrong assignment.** When `--gate xor3` was
+  added, each of the eight clauses carried the input literals `var if bit else
+  -var`, which is falsified at `1 - bit`, so the clause excluded the assignment
+  that *satisfies* the parity instead of the one that violates it. Round-trip
+  selftest failed immediately -- a witness exists by construction, so any UNSAT
+  is the encoder's fault -- and the fix is to negate that literal pattern.
 
 `--mode selftest` now also runs a slack case: it corrupts a witness's target by
 exactly `slack` bits and requires the instance to be SAT *and* every pattern's
@@ -1347,8 +1353,18 @@ exactly what the depth sweep measured.
 That also explains the shape of the frontier. With three glyphs the output
 function is pinned at only three of the eight codes, and 15 of the 16 available
 functions agree on any three points (they all have to); with four the constraints
-separate them and no assignment works. It is a property of the *shape*, not of
-these particular glyphs.
+separate them and almost no assignment works.
+
+Almost, not none. Running every one of the 70 four-glyph subsets (the `--glyphs`
+flag) instead of only the prefix: **1 of 70 is SAT** -- `CEFG`, in 0.1 s, with
+keys `101 010 011 100` -- and the other 69 are UNSAT in ~0.1 s. So the binding
+constraint is still the shape, but "four glyphs is impossible" was a conclusion
+about the four-glyph *prefix* and is too strong by one subset in seventy. It
+also matters that the working four codes lie in a two-dimensional affine
+subspace, so the decoder is only being asked to separate four codes inside
+`{001, 010, 101, 110}` -- the same trick the singleton analysis above describes,
+where a function that is defined on all eight codes restricts to something
+simpler on four.
 
 This is the useful part of the result. The gradient trainer reports "BER 0.224
 after 2,000 epochs" and there is no way to tell whether the wiring, the
@@ -1414,6 +1430,150 @@ gives upper and lower brackets.
 The time curve is also not monotone in the obvious direction -- for four glyphs,
 slack 0 takes 0.1 s and slack 2 takes 3.9 s -- because a looser bound is a
 bigger search problem *and* a weaker contradiction.
+
+### A three-pin XOR, with the bias solved
+
+The next question was whether a different gate helps: two pins wired to candidate
+wires and a third pin a per-gate bias bit that the solver also chooses, so every
+gate is either XOR or XNOR. That is `--gate xor3`; `--gate xor2` is the same gate
+without the bias, as a control. The bias is one variable per gate shared across
+patterns -- part of the circuit, not part of the data -- and each gate-pattern
+costs eight parity clauses.
+
+The first version of that encoding was wrong, and `--mode selftest` caught it
+before any result was quoted: the clause literals for the inputs were inverted,
+so each of the eight clauses forbade the one assignment that *satisfies* the
+parity instead of the one that violates it. A random wiring stopped being a
+witness, which is exactly what the "a witness exists by construction" test is
+for. `--gate xor2` and `--gate xor3` now both pass selftest at 1, 2, 3, 4 and 8
+patterns plus the two slack cases.
+
+**The gate is strictly weaker, and the amount is measurable.** Asking the
+solver, for each of the 256 functions of a three-bit key, whether this decoder
+can compute it at all:
+
+| decoder gate | functions of the key | which ones |
+|---|---|---|
+| NAND | **16 / 256** | the trainer's 16 (see above) |
+| XOR + bias pin | **8 / 256** | `00 ff 3c c3 5a a5 66 99` |
+| XOR, two pins | **4 / 256** | `00 3c 5a 66` |
+
+The eight are exactly `{0, 1, k0⊕k1, k0⊕k2, k1⊕k2}` and their complements, and
+the four are the same set without the complements. That is not a coincidence, it
+is the whole mechanism. The decoder's first layer reads only the three key bits,
+so a gate there can compute `k_i ⊕ k_j` (plus the bias if it has one). It
+cannot compute a single `k_i`, because that needs a XOR with a *constant*, and
+although two identical input choices do produce a constant, they produce it as
+an output of that same layer -- it is not available to the layer that reads the
+key. So the first layer lands in the three-dimensional space
+`S = span{1, k0⊕k1, k0⊕k2, k1⊕k2}`, `S` is closed under XOR and complement, and
+induction gives: every wire at every depth stays inside `S`. Eight functions,
+whatever the depth and whatever the width. A simulation check agrees -- 60
+random wirings of an eight-layer decoder never leave the set.
+
+So the bias pin is worth exactly one doubling (4 → 8): it buys complements.
+The other doubling needs a *constant wire at the input layer* rather than a bias
+per gate. Driving a fourth decoder input with a constant 0 and re-running the
+same random-wiring test reaches all 16 affine functions, `k0`, `k1` and `k2`
+included. That is the affine class in full -- which is still only NAND's 16, so
+even the repaired version of this gate could only tie.
+
+**The exact frontier follows the function count.**
+
+| glyphs | NAND | XOR + bias | XOR (no bias) | NAND **or** XOR per gate |
+|---|---|---|---|---|
+| 1 | SAT | SAT | SAT | SAT |
+| 2 | SAT | SAT | SAT | SAT |
+| 3 | SAT | SAT | **UNSAT** | SAT |
+| 4 | UNSAT | UNSAT | UNSAT | **SAT, 0.8 s** |
+| 8 | UNSAT | UNSAT | UNSAT | not finished |
+
+The bias pin is worth exactly one glyph: without it the template cannot fit
+three.
+
+The last column is the control that decides how to read the whole table, and it
+is the one result here that changes an earlier conclusion. `--gate mix` gives
+every gate a free type bit -- `NAND(a,b)` or `XOR(a,b) XOR bias` -- and asks the
+same question. Three things happen at once:
+
+- the decoder's function count jumps from 16 (NAND) and 8 (XOR+bias) to
+  **134 of 256**;
+- the four-glyph prefix, UNSAT under pure NAND, becomes **SAT in 0.8 s**;
+- and it does so without any change to the shape or the slack.
+
+So the "16 of 256" ceiling is mostly the *gate*, not the template. That is worth
+stating plainly because the section above says the opposite: with one type bit
+per gate, the same `3→16→32→64` decoder computes eight times as many functions
+and fits a glyph set that NAND cannot. What the shape research established is
+that *NAND-only* walls are hard -- the depth and the window still bound what a
+type bit can do (134, not 256) -- but the wall is not a property of the template
+alone. This is the same lesson as the trainer's "learnable gate types" negative
+result (BER 0.2523): gate type is a real axis, and the gradient trainer failed
+on it for optimisation reasons, not because the axis is empty.
+
+**Slack: the affine classes lose the approximate regime too.**
+
+Minimum wrong bits per pattern at which the instance is satisfiable:
+
+| glyphs | gate | min slack | time | BER |
+|---|---|---|---|---|
+| 4 | NAND | **3** | 5.7 s | 0.0469 |
+| 4 | XOR + bias | **6** | 19.7 s (5 is UNSAT, 420 s) | 0.0859 |
+| 4 | XOR, no bias | > 2 | 2 UNSAT, 194 s | — |
+| 8 | NAND | **8** | 291 s | 0.1172 |
+| 8 | XOR + bias | 12 | 26.7 s (8 timed out, 780 s) | 0.1777 |
+
+Two things worth recording. First, the exact four-glyph row is data-dependent at
+the margin, which corrects a sentence further up: over all 70 four-glyph subsets,
+**NAND fits exactly one** (CEFG, keys `101 010 011 100`, 0.1 s) and
+**XOR-with-bias fits none**. "Four glyphs is impossible" was a conclusion drawn
+from the four-glyph prefix; the honest version is "one subset in seventy".
+
+Second, the slack gap is not small: the NAND decoder at four glyphs can be three
+bits wrong per glyph where the XOR one needs six, and at eight glyphs it reaches
+BER 0.1172 where the XOR one needs slack 12 for 0.1777 -- worse than the NAND
+number at less than half the budget. A gate that can only draw 8 of 256 functions
+is not merely a worse sampler of circuits; it is a smaller function class, and
+the solver says so in both regimes. The slack-5 UNSAT took 420 s against a 420 s
+timeout, so it is a proof that only just landed; slack 6 SAT is the load-bearing
+number.
+
+Verdict: NAND stays. The bias pin is a real improvement on plain XOR -- one more
+glyph, twice the function space, and it is what makes the gate "EQ or NEQ"
+rather than a pure parity tree -- but it is a strictly smaller class than the one
+the project already uses, so there is nothing here to ship. The axis it opens,
+gate *type* chosen by the solver, is worth keeping: see `mix` above.
+
+### What a gate costs in transistors
+
+XOR being "worse per gate" understates it once the unit is a device. Static-CMOS
+counts are 4 transistors for NAND2, 2 for an inverter, 12 for XOR2 (a standard
+cell; pass-transistor designs do better but not by much):
+
+| circuit | gates | transistors | breakdown |
+|---|---|---|---|
+| `cats32-nand` | 1,547 | **5,066** | 986 four-device gates + 561 inverters |
+| `cats16-rgb2` | 2,345 | 7,662 | 1,486 + 859 |
+| `mnist32` | 1,287 | 4,094 | 760 + 527 |
+| glyph witness (163 gates) | 163 | 492 | 83 + 80 |
+| same 163-gate shape, all XOR + bias | 163 | **1,956** | 3.0x the silicon |
+
+The 986 in the first row is not a coincidence and it resolves a claim the README
+makes: the "1,547 literal NAND gates" and the "986 AIG nodes" are not two
+estimates of different things. 986 is exactly the number of gates that are *not*
+`Nand(x,x)`, i.e. the same circuit counted with its 561 inverters removed. An
+AIG counts real two-input nodes and makes inversion free, so the AIG number is
+the gate count after deleting every inverter -- and at 4T each, those inverters
+are 1,122 of the model's 5,066 devices, 22% of the silicon spent on negation.
+
+Two consequences for the gate-type thread. A static CMOS gate computes a
+*monotone* function of its inputs in the pull-down network and its complement in
+the pull-up, which is why gates invert and why the inverters are there at all;
+and the device cost is what makes a 3-pin XOR a bad trade (12T for half the
+function class of a 4T NAND). A richer cell library -- pass-transistor XOR,
+AOI/OAI complex gates, muxes -- is the realistic version of the same idea, and
+it is testable in this harness by adding gate types: the `mix` result above is
+the first point on that curve.
 
 ### What the gradient trainer does on the same task
 
@@ -1494,10 +1654,15 @@ it.
   exact answer in 0.1 s. Nothing here is near a solver limit; the interesting
   limits are shape, not size.
 - **The template is the binding constraint, and it breaks early.** Three glyphs
-  out of eight, on the smallest task in the repo. That is the same hierarchical
-  wiring (local windows, 2^depth dependency cap) the 32x32 model uses, and the
-  measured reason is that the decoder can compute only 16 of the 256 functions
-  of its key.
+  out of eight under NAND, on the smallest task in the repo. That is the same
+  hierarchical wiring (local windows, 2^depth dependency cap) the 32x32 model
+  uses, and the measured reason is that the NAND decoder can compute only 16 of
+  the 256 functions of its key.
+- **But "template" was too coarse: it is template *and* gate.** One free type
+  bit per gate (NAND or XOR+bias) takes the same decoder from 16 functions to
+  134 and from "four glyphs UNSAT" to "four glyphs exact in 0.8 s". So NAND-only
+  is where the wall is hardest, and the wall is not a property of the wiring
+  alone -- which is a correction to this checkpoint, not a footnote.
 - **Infeasibility is cheap to prove and expensive to guess.** The gradient
   trainer's failure on a shape looks identical to an optimiser problem; the SAT
   answer distinguishes them in a tenth of a second, and slack turns it into a
@@ -1509,7 +1674,10 @@ it.
 Untested, and the obvious next questions: what shape *is* feasible for eight
 glyphs (the function-count measurement above says it needs either more key bits
 or same-resolution mixing in the decoder -- the encoder is general over layer
-widths, so this is a shape search, not a solver problem); and whether a
+widths, so this is a shape search, not a solver problem); what the `mix` gate
+does at eight glyphs (the run was abandoned rather than timed out, so it is an
+open number, not a negative); whether a two-or-three-type gate library -- the
+transistor-level question -- beats one fixed gate per device; and whether a
 32x32-ish shape of the trainer's design is feasible for a handful of images.
 The cone measurement above is the 32x32 answer in the form that is computable,
 and it is unfriendly: the decoder's median output sees two key bits and the
@@ -1543,6 +1711,15 @@ done
 # smaller decoder/impossible-by-construction checks
 python3 scripts/sat_ae.py --solver $K --patterns 8 --slack 4   # UNSAT
 python3 scripts/sat_ae.py --solver $K --patterns 8 --slack 8   # SAT, ~5 min
+
+# gate type: XOR with a solved bias, plain XOR, or a free type bit per gate
+python3 scripts/sat_ae.py --solver $K --gate xor3 --patterns 4       # UNSAT
+python3 scripts/sat_ae.py --solver $K --gate xor2 --patterns 3       # UNSAT
+python3 scripts/sat_ae.py --solver $K --gate mix  --patterns 4       # SAT, 0.8 s
+python3 scripts/sat_ae.py --solver $K --gate mix --mode functions --shape 3,16,32,64
+
+# which four glyphs fit, rather than only the prefix
+python3 scripts/sat_ae.py --solver $K --glyphs CEFG --patterns 4     # SAT
 
 # how many functions of the key the decoder can compute (3-bit keys only)
 python3 scripts/sat_ae.py --solver $K --mode functions --shape 3,16,32,64

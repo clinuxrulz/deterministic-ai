@@ -102,6 +102,15 @@ default; see `docs/experiment.md` Checkpoints 6 and 7.
 an inverter is *not* free, so 986 is a size metric for comparison with synthesis
 literature, not a claim about hardware.
 
+The two numbers are also more related than that makes them sound: **986 is
+exactly the count of gates that are not `Nand(x,x)`**, i.e. the same circuit with
+its 561 inverters deleted, so the "AIG node count" is not an independent
+estimate. In static-CMOS devices (NAND2 4T, inverter 2T, XOR2 12T) the shipped
+model is **5,066 transistors**, 1,122 of them (22%) inverters; `cats16-rgb2` is
+7,662 and `mnist32` 4,094. The 163-gate glyph witness is 492T, and the same
+shape in XOR+bias gates would be 1,956T — 3x the silicon for half the function
+class, which is the device-level reason not to ship XOR.
+
 For comparison: the genetic algorithm reached test BER 0.2097 with 4,096
 XOR+AND gates. Gradient-trained *gate types* (non-NAND) only reached 0.2523, so
 restricting to NAND and learning only wiring is what produced the win.
@@ -283,7 +292,7 @@ cargo run --release -p xorae -- export \
 | `crates/cli/src/ga.rs` | Genetic algorithm, fitness, evaluation |
 | `crates/cli/src/dataset.rs` | CIFAR loader, planar fix, `XAE4` format, palette/colour modes |
 | `crates/wasm/src/lib.rs` | `wasm-bindgen` bridge |
-| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions` modes |
+| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions` modes, `--gate {nand,xor3,xor2}`, `--glyphs`/`--slack`/`--export` |
 | `scripts/circuit_cones.py` | exact dependency cones of every wire: what an output *can* depend on |
 | `scripts/make_glyph_dataset.py` | writes the 8×8 glyphs as `XAE4` so `train-nand` can train on the same data |
 | `web/src/App.tsx` | Solid 2.0 UI |
@@ -385,6 +394,31 @@ answer for the shipped 32×32 model is hostile: every decoder output sees at mos
 reads only **362 of 1,024** input pixels. That is the same ceiling as the glyph
 result, in a form that can be measured at any key size.
 
+**`--gate {nand,xor3,xor2}` swaps the gate.** `xor3` is two wires plus a
+per-gate bias bit the solver also chooses (so each gate is XOR or XNOR, and the
+net is affine over GF(2)); `xor2` is the same without the bias. The result is a
+clean loss, and it is a *count* rather than a BER: the decoder can compute only
+**8 of the 256 functions** of a 3-bit key with `xor3` and **4** with `xor2`,
+against NAND's 16. Exact fit stops at 3 glyphs for `xor3` (same as NAND), 2 for
+`xor2`, and across all 70 four-glyph subsets `xor3` fits 0 where NAND fits 1
+(CEFG); at four glyphs `xor3` cannot reach slack 3, which NAND reaches in 5.7 s.
+Mechanism: the decoder's first layer reads only key bits, so a gate there can
+compute `k_i ⊕ k_j` but never a single `k_i` (that needs a XOR with a constant,
+and the constants a gate can make are outputs of the same layer). Every wire
+therefore stays in `span{1, k0⊕k1, k0⊕k2, k1⊕k2}` at any depth — 8 functions;
+the bias buys the complements, taking 4 to 8. A decoder input pinned to 0 would
+buy the other doubling and reach all 16 affine functions, i.e. at best tie NAND.
+Five bugs have now been caught by selftest; the fifth was this gate's parity
+clauses forbidding the satisfying assignment instead of the violating one.
+
+**`--gate mix` is the control that matters, and it corrects the checkpoint.** A
+free type bit per gate (`NAND(a,b)` or `XOR(a,b) XOR bias`) takes the same
+`3→16→32→64` decoder from 16 functions of a 3-bit key to **134 of 256**, and from
+"four glyphs UNSAT" to **"four glyphs exact in 0.8 s"**. So the 16-of-256 wall is
+mostly the *gate*, not the template; the shape still bounds it (134, not 256)
+but "the template is the limit" was too coarse. Eight glyphs under `mix` was
+abandoned, not timed out — do not quote it.
+
 ## What has been ruled out (with evidence)
 
 Do not spend time re-running these.
@@ -412,7 +446,8 @@ Do not spend time re-running these.
 | Gödel `min` as the default | Better at equal training budget (−0.0089 over 10 seeds) but much worse at equal size: pruned to 1,400 gates it scores 0.2154 vs 0.1811 for product (0/5 seeds win). Its extra gates are load-bearing |
 | **24-bit RGB (`--rgb8`)** | 16×16: abs MAE **0.2120** vs mean image 0.2031 (16,128 gates). 4×4: **0.2382** vs 0.1665 (1,008 gates). Cannot memorise 100 images either (train BER 0.3839 at 16×16 after ~18,700 updates, vs 0.1741 for grayscale). Half the planes are noise — see Checkpoint 11 |
 | 4×4 with more rate / mixing / depth / width | Key 48→96→192: abs MAE 0.2411 / **0.2325** (BER falls 0.4425→0.4110, but the gain is entirely in the noise planes). Cross-plane candidates: 0.2396. Same-resolution layers (8 levels instead of 4): 0.2764, same memorisation number (0.4130). Overcomplete first layer (3,312 gates, 5 levels per side): 0.2319, best of the family, 2.6× the gates for 0.006 MAE and memorisation 0.3977. Nothing approaches the 0.1665 bar |
-| SAT-solved wiring on 8×8 glyphs (`scripts/sat_ae.py`) | Kissat 4.0.1 proves the trainer's template `64→32→16→3→16→32→64` (163 gates) fits 1–3 glyphs exactly and is **UNSAT at 4**, in 0.1 s (CaDiCaL 3.0 agrees). Not the key size and not the encoder: a 3-bit key separates all 8 glyphs, but the decoder computes only **16 of the 256 functions** of a 3-bit key (18 with 5 extra mixing layers, 18 at *any* depth), so four glyphs cannot be decoded by any key assignment. Wider keys (4/5/6/8 bits), 4 extra same-resolution layers, and 32-wide decoders change nothing. Exact fit tops out at 3 of 8; the minimum slack is 3 wrong bits per pattern for 4 glyphs and 8 for 8 glyphs (BER 0.1172). A 3-glyph exact circuit is pure lookup: all 5 held-out glyphs decode bit-exactly to one of the 3 trained images |
+| SAT-solved wiring on 8×8 glyphs (`scripts/sat_ae.py`) | Kissat 4.0.1 proves the trainer's template `64→32→16→3→16→32→64` (163 gates) fits 1–3 glyphs exactly and is **UNSAT at 4**, in 0.1 s (CaDiCaL 3.0 agrees). Not the key size and not the encoder: a 3-bit key separates all 8 glyphs, but the decoder computes only **16 of the 256 functions** of a 3-bit key (18 with 5 extra mixing layers, 18 at *any* depth), so four glyphs is essentially never decodable — 1 of the 70 four-glyph subsets fits (CEFG), the rest are UNSAT. Wider keys (4/5/6/8 bits), 4 extra same-resolution layers, and 32-wide decoders change nothing. Exact fit tops out at 3 of 8; the minimum slack is 3 wrong bits per pattern for 4 glyphs and 8 for 8 glyphs (BER 0.1172). A 3-glyph exact circuit is pure lookup: 3 of the 5 held-out glyphs decode bit-exactly to a trained image, 2 land on an untrained code |
+| 3-pin XOR (XOR/XNOR) gates in the SAT template (`--gate xor3`, bias bit solved per gate) | Strictly fewer functions than NAND: **8 of 256** functions of a 3-bit key (plain 2-input XOR, `--gate xor2`, gets 4; NAND gets 16), because the decoder's first layer can build `k_i⊕k_j` but never a single `k_i` and the reachable set `span{1,k0⊕k1,k0⊕k2,k1⊕k2}` is closed forever. Exact fit stops at 3 glyphs (same as NAND) but 0/70 four-glyph subsets vs NAND's 1/70, and it cannot reach slack 3 at four glyphs where NAND is SAT in 5.7 s. The bias pin is worth exactly one doubling (4→8); a decoder input pinned to 0 would buy the other and reach the full 16-function affine class, i.e. at best tie NAND |
 
 ## Open threads, in priority order
 

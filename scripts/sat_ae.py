@@ -38,6 +38,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import random
 import subprocess
@@ -140,10 +141,28 @@ def at_most_k(cnf: Cnf, xs: list[int], k: int) -> None:
 
 
 class Net:
-    """Fixed shape, wiring chosen by the solver."""
+    """Fixed shape, wiring chosen by the solver.
 
-    def __init__(self, sizes: list[int]) -> None:
+    Three gate types, because they are genuinely different beasts:
+
+    * ``nand``  - ``out = NAND(in_a, in_b)``; a universal gate, and the only
+                  kind the trainer uses.
+    * ``xor3``  - ``out = in_a XOR in_b XOR bias`` with a SAT-chosen bias bit
+                  per gate, so every gate is XOR or XNOR. This makes the whole
+                  circuit an affine map over GF(2) (see docs/linearity.md), so
+                  the comparison with NAND is also a comparison with a much
+                  smaller function class.
+    * ``xor2``  - ``out = in_a XOR in_b``; the same experiment without the bias
+                  pin, which isolates what the bias actually buys.
+    * ``mix``   - each gate gets a free type bit: NAND(a, b) or XOR(a, b) XOR
+                  bias. One nonlinear gate is enough to escape the affine
+                  class, so this measures how much of the 256-function ceiling
+                  was the gate and how much was the shape.
+    """
+
+    def __init__(self, sizes: list[int], op: str = "nand") -> None:
         self.sizes = sizes
+        self.op = op
         self.gates: list[dict] = []
         self.value_vars: list[list[list[int]]] = []
         self.selectors: list[list[int]] = []
@@ -183,8 +202,17 @@ class Net:
                 b_bits = [cnf.var() for _ in range(bits)]
                 vals = [cnf.var() for _ in range(n_patterns)]
                 planes.append(vals)
-                self.gates.append({"layer": layer, "node": j, "cands": cands,
-                                   "a_bits": a_bits, "b_bits": b_bits})
+                gate = {"layer": layer, "node": j, "cands": cands,
+                        "a_bits": a_bits, "b_bits": b_bits}
+                if self.op in ("xor3", "mix"):
+                    # One bias bit per gate, shared by every pattern (it is
+                    # part of the circuit, not part of the data): bias 0 gives
+                    # XOR, bias 1 gives XNOR. Still affine over GF(2).
+                    gate["bias"] = cnf.var()
+                if self.op == "mix":
+                    # kind 0 = NAND(a, b), kind 1 = XOR(a, b) ^ bias.
+                    gate["kind"] = cnf.var()
+                self.gates.append(gate)
                 for p in range(n_patterns):
                     in_a = cnf.var()
                     in_b = cnf.var()
@@ -199,9 +227,31 @@ class Net:
                         cnf.add([-m for m in match_b] + [-in_b, src_v])
                         cnf.add([-m for m in match_b] + [in_b, -src_v])
                     out_v = vals[p]
-                    cnf.add([-out_v, -in_a, -in_b])
-                    cnf.add([out_v, in_a])
-                    cnf.add([out_v, in_b])
+                    guard = [gate["kind"]] if self.op == "mix" else []
+                    if self.op in ("nand", "mix"):
+                        # With ``guard = [kind]`` these read "if kind is 0";
+                        # with no guard they are the plain NAND clauses.
+                        cnf.add(guard + [-out_v, -in_a, -in_b])
+                        cnf.add(guard + [out_v, in_a])
+                        cnf.add(guard + [out_v, in_b])
+                    if self.op in ("xor2", "xor3", "mix"):
+                        # out = in_a ^ in_b (^ bias). One clause per input
+                        # combination, forbidding the single output that would
+                        # violate it: a clause is falsified exactly by the
+                        # assignment its literals all disagree with, so the
+                        # inputs carry ``-var if bit else var`` (falsified at
+                        # ``bit``) and the output carries the opposite of the
+                        # required parity.
+                        guard_x = [-gate["kind"]] if self.op == "mix" else []
+                        inputs = (in_a, in_b) if self.op == "xor2" else (in_a, in_b, gate["bias"])
+                        for combo in itertools.product((0, 1), repeat=len(inputs)):
+                            parity = 0
+                            for bit in combo:
+                                parity ^= bit
+                            clause = [-var if bit else var
+                                      for bit, var in zip(combo, inputs)]
+                            clause.append(out_v if parity else -out_v)
+                            cnf.add(guard_x + clause)
             self.value_vars.append(planes)
 
         # Output equalities, optionally soft with a per-pattern budget.
@@ -264,24 +314,53 @@ def read_index(assignment: dict[int, bool], bits: list[int]) -> int:
     return index
 
 
-def simulate_wiring(net: Net, wiring: list[tuple[int, int]], pattern: list[int]) -> list[int]:
+def simulate_wiring(net: Net, wiring: list[tuple[int, ...]], pattern: list[int]) -> list[int]:
     values = [list(pattern)]
     for layer in range(1, len(net.sizes)):
         planes = [0] * net.sizes[layer]
-        for gate, (index_a, index_b) in zip(net.gates, wiring):
+        for gate, choice in zip(net.gates, wiring):
             if gate["layer"] != layer:
                 continue
-            src_a = values[layer - 1][gate["cands"][index_a]]
-            src_b = values[layer - 1][gate["cands"][index_b]]
-            planes[gate["node"]] = 0 if (src_a and src_b) else 1
+            src_a = values[layer - 1][gate["cands"][choice[0]]]
+            src_b = values[layer - 1][gate["cands"][choice[1]]]
+            if net.op == "nand":
+                planes[gate["node"]] = 0 if (src_a and src_b) else 1
+            elif net.op == "xor2":
+                planes[gate["node"]] = src_a ^ src_b
+            elif net.op == "xor3":
+                planes[gate["node"]] = src_a ^ src_b ^ choice[2]
+            else:  # mix: choice is (index_a, index_b, bias, kind)
+                if choice[3]:
+                    planes[gate["node"]] = src_a ^ src_b ^ choice[2]
+                else:
+                    planes[gate["node"]] = 0 if (src_a and src_b) else 1
         values.append(planes)
     return values[-1]
 
 
 def simulate(net: Net, assignment: dict[int, bool], pattern: list[int]) -> list[int]:
-    wiring = [(read_index(assignment, g["a_bits"]), read_index(assignment, g["b_bits"]))
-              for g in net.gates]
+    wiring = []
+    for g in net.gates:
+        choice = (read_index(assignment, g["a_bits"]), read_index(assignment, g["b_bits"]))
+        if net.op in ("xor3", "mix"):
+            choice += (1 if assignment.get(g["bias"], False) else 0,)
+        if net.op == "mix":
+            choice += (1 if assignment.get(g["kind"], False) else 0,)
+        wiring.append(choice)
     return simulate_wiring(net, wiring, pattern)
+
+
+def random_wiring(net: Net, rng: random.Random) -> list[tuple[int, ...]]:
+    """A wiring the solver must be able to recover (used by the selftests)."""
+    wiring = []
+    for gate in net.gates:
+        choice = (rng.randrange(len(gate["cands"])), rng.randrange(len(gate["cands"])))
+        if net.op in ("xor3", "mix"):
+            choice += (rng.getrandbits(1),)
+        if net.op == "mix":
+            choice += (rng.getrandbits(1),)
+        wiring.append(choice)
+    return wiring
 
 
 def run(solver: str, cnf: Cnf, timeout: float, workdir: Path):
@@ -322,8 +401,14 @@ def circuit_json(net: "Net", wiring: list[tuple[int, int]], base_layer: int,
         for node in range(net.sizes[layer]):
             index = pos[(layer, node)]
             cands = net.gates[index]["cands"]
-            index_a, index_b = wiring[index]
-            gates.append({"op": "nand",
+            index_a, index_b = wiring[index][0], wiring[index][1]
+            if net.op == "nand" or (net.op == "mix" and not wiring[index][3]):
+                op = "nand"
+            else:
+                # bias 0 is XOR, bias 1 is XNOR -- the same gate with the
+                # constant folded in, which is exactly what the SAT bit means.
+                op = "xnor" if net.op in ("xor3", "mix") and wiring[index][2] else "xor"
+            gates.append({"op": op,
                           "a": wire[(layer - 1, cands[index_a])],
                           "b": wire[(layer - 1, cands[index_b])]})
             wire[(layer, node)] = n_inputs + 2 + len(gates) - 1
@@ -337,15 +422,28 @@ def eval_circuit(circuit: dict, inputs: list[int]) -> list[int]:
     wires = list(inputs[:n]) + [0, 1] + [0] * len(circuit["gates"])
     for i, gate in enumerate(circuit["gates"]):
         a, b = wires[gate["a"]], wires[gate["b"]]
-        wires[n + 2 + i] = 0 if (a and b) else 1
+        if gate["op"] == "nand":
+            wires[n + 2 + i] = 0 if (a and b) else 1
+        elif gate["op"] == "xor":
+            wires[n + 2 + i] = a ^ b
+        elif gate["op"] == "xnor":
+            wires[n + 2 + i] = 1 - (a ^ b)
+        else:
+            raise ValueError(f"unsupported op {gate['op']}")
     return [wires[out] for out in circuit["outputs"]]
 
 
 def export_web(net: "Net", assignment: dict[int, bool], names: list[str],
                out_dir: Path, solver: str, elapsed: float) -> bool:
     """Write the witness as circuits the browser can run, plus its metadata."""
-    wiring = [(read_index(assignment, g["a_bits"]), read_index(assignment, g["b_bits"]))
-              for g in net.gates]
+    wiring = []
+    for g in net.gates:
+        choice = (read_index(assignment, g["a_bits"]), read_index(assignment, g["b_bits"]))
+        if net.op in ("xor3", "mix"):
+            choice += (1 if assignment.get(g["bias"], False) else 0,)
+        if net.op == "mix":
+            choice += (1 if assignment.get(g["kind"], False) else 0,)
+        wiring.append(choice)
     key_layer = net.key_layer()
     last = len(net.sizes) - 1
     encoder = circuit_json(net, wiring, 0, key_layer)
@@ -415,31 +513,35 @@ def glyphs(names: list[str], width: int) -> list[list[int]]:
 
 
 def selftest(solver: str, sizes: list[int], n_patterns: int, timeout: float,
-             seed: int) -> bool:
+             seed: int, op: str = "nand") -> bool:
     """A random wiring defines the targets, so the instance must be SAT."""
     rng = random.Random(seed)
     inputs = [[rng.getrandbits(1) for _ in range(sizes[0])] for _ in range(n_patterns)]
-    probe = Net(sizes)
+    probe = Net(sizes, op)
     probe.build(Cnf(), inputs, inputs, 0)
-    wiring = [(rng.randrange(len(g["cands"])), rng.randrange(len(g["cands"])))
-              for g in probe.gates]
+    wiring = random_wiring(probe, rng)
     targets = [simulate_wiring(probe, wiring, p) for p in inputs]
 
     cnf = Cnf()
-    net = Net(sizes)
+    net = Net(sizes, op)
     net.build(cnf, inputs, targets, 0)
-    for gate, (index_a, index_b) in zip(net.gates, wiring):
+    for gate, choice in zip(net.gates, wiring):
+        index_a, index_b = choice[0], choice[1]
         for k, var in enumerate(gate["a_bits"]):
             cnf.add([var if (index_a >> k) & 1 else -var])
         for k, var in enumerate(gate["b_bits"]):
             cnf.add([var if (index_b >> k) & 1 else -var])
+        if op in ("xor3", "mix"):
+            cnf.add([gate["bias"] if choice[2] else -gate["bias"]])
+        if op == "mix":
+            cnf.add([gate["kind"] if choice[3] else -gate["kind"]])
 
     workdir = Path(tempfile.mkdtemp(prefix="sat_ae_"))
     status, elapsed, model = run(solver, cnf, timeout, workdir)
     ok = status == "sat"
     if ok:
         ok = all(simulate(net, model, p) == t for p, t in zip(inputs, targets))
-    print(f"selftest {len(sizes)}-layer, {n_patterns} patterns: "
+    print(f"selftest {op} {len(sizes)}-layer, {n_patterns} patterns: "
           f"{'ok' if ok else 'FAILED'} ({status} in {elapsed:.1f}s, "
           f"{cnf.n} vars, {len(cnf.clauses)} clauses)")
     return ok
@@ -500,7 +602,7 @@ def brute(solver: str, sizes: list[int], n_patterns: int, trials: int, seed: int
 
 
 def slacktest(solver: str, sizes: list[int], n_patterns: int, slack: int,
-              corrupt: int, timeout: float, seed: int) -> bool:
+              corrupt: int, timeout: float, seed: int, op: str = "nand") -> bool:
     """Corrupt a witness and require slack to accept it within its bound.
 
     The witness fits with exactly `corrupt` wrong bits in pattern 0, so the
@@ -509,16 +611,15 @@ def slacktest(solver: str, sizes: list[int], n_patterns: int, slack: int,
     """
     rng = random.Random(seed)
     inputs = [[rng.getrandbits(1) for _ in range(sizes[0])] for _ in range(n_patterns)]
-    probe = Net(sizes)
+    probe = Net(sizes, op)
     probe.build(Cnf(), inputs, inputs, 0)
-    wiring = [(rng.randrange(len(g["cands"])), rng.randrange(len(g["cands"])))
-              for g in probe.gates]
+    wiring = random_wiring(probe, rng)
     targets = [simulate_wiring(probe, wiring, p) for p in inputs]
     for bit in rng.sample(range(sizes[-1]), corrupt):
         targets[0][bit] ^= 1
 
     cnf = Cnf()
-    net = Net(sizes)
+    net = Net(sizes, op)
     net.build(cnf, inputs, targets, slack)
     workdir = Path(tempfile.mkdtemp(prefix="sat_slack_"))
     status, elapsed, model = run(solver, cnf, timeout, workdir)
@@ -527,13 +628,13 @@ def slacktest(solver: str, sizes: list[int], n_patterns: int, slack: int,
         wrong = [sum(a != b for a, b in zip(simulate(net, model, p), t))
                  for p, t in zip(inputs, targets)]
         ok = all(w <= slack for w in wrong)
-    print(f"slacktest {len(sizes)}-layer, {n_patterns} patterns, slack {slack}, "
+    print(f"slacktest {op} {len(sizes)}-layer, {n_patterns} patterns, slack {slack}, "
           f"{corrupt} corrupt bits: {'ok' if ok else 'FAILED'} "
           f"({status} in {elapsed:.1f}s)")
     return ok
 
 
-def function_table(solver: str, sizes: list[int], timeout: float) -> int:
+def function_table(solver: str, sizes: list[int], timeout: float, op: str = "nand") -> int:
     """How many functions of the key can this decoder compute?
 
     Only meaningful for a 3-bit key: 2^(2^3) = 256 functions, one SAT call each.
@@ -549,14 +650,15 @@ def function_table(solver: str, sizes: list[int], timeout: float) -> int:
     for f in range(1 << (1 << bits)):
         targets = [[(f >> c) & 1] * sizes[-1] for c in range(1 << bits)]
         cnf = Cnf()
-        net = Net(sizes)
+        net = Net(sizes, op)
         net.build(cnf, codes, targets, 0)
         status, _, _ = run(solver, cnf, timeout, Path(tempfile.mkdtemp(prefix="sat_fn_")))
         if status == "sat":
             found.append(f)
     total = 1 << (1 << bits)
-    print(f"decoder {'-'.join(map(str, sizes))}: {len(found)}/{total} functions of "
-          f"the {bits}-bit key realisable")
+    print(f"decoder {op} {'-'.join(map(str, sizes))}: {len(found)}/{total} functions "
+          f"of the {bits}-bit key realisable: "
+          f"{' '.join(format(f, '02x') for f in found)}")
     return len(found)
 
 
@@ -567,10 +669,18 @@ def main() -> int:
                         help="layer widths, input first (default 64,32,16,3,16,32,64)")
     parser.add_argument("--patterns", type=int, default=8,
                         help="number of glyphs to fit (default all 8)")
+    parser.add_argument("--glyphs", metavar="NAMES",
+                        help="explicit glyph names, e.g. BCDE (default: the "
+                             "first --patterns of ABCDEFGH)")
     parser.add_argument("--slack", type=int, default=0,
                         help="maximum wrong output bits per pattern")
     parser.add_argument("--mode", choices=["full", "encoder", "decoder", "selftest", "brute", "functions"],
                         default="full")
+    parser.add_argument("--gate", choices=["nand", "xor3", "xor2", "mix"], default="nand",
+                        help="nand = NAND(a,b); xor3 = XOR(a,b) plus a SAT-chosen "
+                             "bias bit per gate (affine over GF(2)); xor2 = plain "
+                             "2-input XOR, no bias; mix = a free type bit per gate "
+                             "choosing NAND or XOR^bias")
     parser.add_argument("--solver", default="kissat", help="SAT solver binary")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--keep", help="copy the CNF here for inspection")
@@ -581,18 +691,28 @@ def main() -> int:
 
     sizes = [int(x) for x in args.shape.split(",")]
     if args.mode == "selftest":
-        ok = all(selftest(args.solver, sizes, n, args.timeout, seed)
+        ok = all(selftest(args.solver, sizes, n, args.timeout, seed, args.gate)
                  for n, seed in [(1, 1), (2, 2), (3, 3), (4, 4), (8, 5)])
-        ok = slacktest(args.solver, sizes, 4, 5, 5, args.timeout, 6) and ok
-        ok = slacktest(args.solver, sizes, 4, 0, 0, args.timeout, 7) and ok
+        ok = slacktest(args.solver, sizes, 4, 5, 5, args.timeout, 6, args.gate) and ok
+        ok = slacktest(args.solver, sizes, 4, 0, 0, args.timeout, 7, args.gate) and ok
         return 0 if ok else 1
     if args.mode == "brute":
+        if args.gate != "nand":
+            print("brute force only enumerates NAND wirings; an XOR gate has "
+                  "another wire choice (and xor3 a bias bit too), which blows "
+                  "the 200k-instance budget")
+            return 1
         return 0 if brute(args.solver, sizes, args.patterns, 12, 1) else 1
     if args.mode == "functions":
-        function_table(args.solver, sizes, args.timeout)
+        function_table(args.solver, sizes, args.timeout, args.gate)
         return 0
 
-    names = list(GLYPHS)[: args.patterns]
+    names = list(args.glyphs) if args.glyphs else list(GLYPHS)[: args.patterns]
+    unknown = [n for n in names if n not in GLYPHS]
+    if unknown:
+        print(f"unknown glyph(s) {unknown}; choose from {''.join(GLYPHS)}")
+        return 1
+    n_patterns = len(names)
     if args.mode == "encoder":
         # Stop at the bottleneck: this asks whether the encoder alone can put
         # the patterns on distinct keys, with no reconstruction to satisfy.
@@ -601,11 +721,11 @@ def main() -> int:
     patterns = glyphs(names, sizes[0]) if args.mode != "decoder" else glyphs(names, 64)
 
     cnf = Cnf()
-    net = Net(sizes)
+    net = Net(sizes, args.gate)
     if args.mode == "decoder":
         # Keys are free but must differ: this isolates the decoder's expressive
         # power from the encoder's.
-        inputs = [[0] * sizes[0] for _ in range(args.patterns)]
+        inputs = [[0] * sizes[0] for _ in range(n_patterns)]
         net.build(cnf, inputs, patterns, args.slack, free_inputs=True)
         net.separate(cnf, layer=0)
     else:
@@ -621,11 +741,11 @@ def main() -> int:
 
     shape = "-".join(map(str, sizes))
     if args.csv:
-        print(f"{shape},{args.patterns},{args.mode},{args.slack},{status},"
+        print(f"{args.gate},{shape},{''.join(names)},{args.mode},{args.slack},{status},"
               f"{elapsed:.2f},{cnf.n},{len(cnf.clauses)}")
     else:
-        print(f"shape {shape}, {args.patterns} patterns, mode {args.mode}, "
-              f"slack {args.slack}")
+        print(f"shape {shape}, {''.join(names)} ({n_patterns} patterns), mode {args.mode}, "
+              f"slack {args.slack}, gate {args.gate}")
         print(f"cnf: {cnf.n} vars, {len(cnf.clauses)} clauses")
         print(f"result: {status} in {elapsed:.1f}s")
 
