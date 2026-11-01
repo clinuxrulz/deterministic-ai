@@ -1399,6 +1399,12 @@ is a wide bracket, and it is honest to leave it as one. (Slack 9 also comes back
 SAT, which is what "at most 9" should do if 8 is feasible; it adds nothing but
 one more consistency check.)
 
+A 4-bit key does not move the frontier: with `64→32→16→4→16→32→64`, slack 4 and
+6 both time out at ten minutes and slack 8 comes back SAT in 24.5 s with BER
+0.1172 — the same solution quality, and faster, because a wider key gives the
+decoder more room rather than more power. Consistent with the function count:
+the limit is the shape of the decoder, not how many bits the key has.
+
 A slack bound is a *feasibility* test, not an optimiser, and the numbers say so:
 slack 10 returned BER 0.1504, worse than slack 8, because nothing asked for the
 minimum. Finding the true optimum is a MaxSAT problem (RC2 or a linear-search
