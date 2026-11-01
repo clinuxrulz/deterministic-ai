@@ -599,6 +599,7 @@
       "wrong_bits": 20
     }
   ],
-  "infeasible": "Kissat proves no wiring of this shape fits four glyphs: the 3-level decoder can compute only 16 of the 256 functions of a 3-bit key, so each output bit is identical on at least two of any four codes.",
+  "gate": "nand",
+  "infeasible": "Kissat proves the four-glyph prefix ABCD cannot fit: the 3-level decoder can compute only 16 of the 256 functions of a 3-bit key. Of all 70 four-glyph subsets exactly one (CEFG) does.",
   "note": "Every gate is NAND, so the circuit is nothing but wire numbers. The key has 3 bits, which is 8 codes, and only the trained ones were asked for: the other codes are whatever the decoder happens to compute there."
 }

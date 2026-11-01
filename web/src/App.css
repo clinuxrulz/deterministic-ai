@@ -613,6 +613,21 @@ button:focus,
   min-width: 0;
 }
 
+/* The second witness (NAND or AND per gate) spans the whole tab. */
+.sat-inv {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr);
+  gap: 1.25rem;
+  align-items: start;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--line, #2a2f3a);
+}
+
+.sat-inv .sat-head {
+  grid-column: 1 / -1;
+}
+
 .sat-glyphs {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -762,6 +777,10 @@ button:focus,
 
 @media (max-width: 760px) {
   .satlab {
+    grid-template-columns: 1fr;
+  }
+
+  .sat-inv {
     grid-template-columns: 1fr;
   }
 

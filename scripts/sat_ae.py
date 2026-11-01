@@ -41,6 +41,7 @@ import argparse
 import itertools
 import json
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -154,6 +155,11 @@ class Net:
                   smaller function class.
     * ``xor2``  - ``out = in_a XOR in_b``; the same experiment without the bias
                   pin, which isolates what the bias actually buys.
+    * ``nandinv`` - NAND(a, b), with a free bit per gate that inverts the
+                  result, so a gate is NAND or AND. Not a new function class
+                  (AND(x,y) = NOT NAND(x,y)) but it moves the inversion to the
+                  layer that needs it: under nand-only, AND of two wires costs
+                  a gate in the next layer, which the last layer does not have.
     * ``mix``   - each gate gets a free type bit: NAND(a, b) or XOR(a, b) XOR
                   bias. One nonlinear gate is enough to escape the affine
                   class, so this measures how much of the 256-function ceiling
@@ -209,6 +215,9 @@ class Net:
                     # part of the circuit, not part of the data): bias 0 gives
                     # XOR, bias 1 gives XNOR. Still affine over GF(2).
                     gate["bias"] = cnf.var()
+                if self.op == "nandinv":
+                    # inv 0 = NAND, inv 1 = AND (the inverted NAND output).
+                    gate["inv"] = cnf.var()
                 if self.op == "mix":
                     # kind 0 = NAND(a, b), kind 1 = XOR(a, b) ^ bias.
                     gate["kind"] = cnf.var()
@@ -227,13 +236,25 @@ class Net:
                         cnf.add([-m for m in match_b] + [-in_b, src_v])
                         cnf.add([-m for m in match_b] + [in_b, -src_v])
                     out_v = vals[p]
-                    guard = [gate["kind"]] if self.op == "mix" else []
-                    if self.op in ("nand", "mix"):
+                    if self.op == "mix":
+                        guard = [gate["kind"]]
+                    elif self.op == "nandinv":
+                        guard = [gate["inv"]]
+                    else:
+                        guard = []
+                    if self.op in ("nand", "mix", "nandinv"):
                         # With ``guard = [kind]`` these read "if kind is 0";
                         # with no guard they are the plain NAND clauses.
                         cnf.add(guard + [-out_v, -in_a, -in_b])
                         cnf.add(guard + [out_v, in_a])
                         cnf.add(guard + [out_v, in_b])
+                    if self.op == "nandinv":
+                        # Same guard pattern with the opposite polarity:
+                        # ``[-inv]`` is false when inv is 1, so these reduce
+                        # to out = a AND b when the bit is set.
+                        cnf.add([-gate["inv"], -out_v, in_a])
+                        cnf.add([-gate["inv"], -out_v, in_b])
+                        cnf.add([-gate["inv"], out_v, -in_a, -in_b])
                     if self.op in ("xor2", "xor3", "mix"):
                         # out = in_a ^ in_b (^ bias). One clause per input
                         # combination, forbidding the single output that would
@@ -327,6 +348,8 @@ def simulate_wiring(net: Net, wiring: list[tuple[int, ...]], pattern: list[int])
                 planes[gate["node"]] = 0 if (src_a and src_b) else 1
             elif net.op == "xor2":
                 planes[gate["node"]] = src_a ^ src_b
+            elif net.op == "nandinv":
+                planes[gate["node"]] = (src_a & src_b) if choice[2] else (0 if (src_a and src_b) else 1)
             elif net.op == "xor3":
                 planes[gate["node"]] = src_a ^ src_b ^ choice[2]
             else:  # mix: choice is (index_a, index_b, bias, kind)
@@ -344,6 +367,8 @@ def simulate(net: Net, assignment: dict[int, bool], pattern: list[int]) -> list[
         choice = (read_index(assignment, g["a_bits"]), read_index(assignment, g["b_bits"]))
         if net.op in ("xor3", "mix"):
             choice += (1 if assignment.get(g["bias"], False) else 0,)
+        if net.op == "nandinv":
+            choice += (1 if assignment.get(g["inv"], False) else 0,)
         if net.op == "mix":
             choice += (1 if assignment.get(g["kind"], False) else 0,)
         wiring.append(choice)
@@ -356,6 +381,8 @@ def random_wiring(net: Net, rng: random.Random) -> list[tuple[int, ...]]:
     for gate in net.gates:
         choice = (rng.randrange(len(gate["cands"])), rng.randrange(len(gate["cands"])))
         if net.op in ("xor3", "mix"):
+            choice += (rng.getrandbits(1),)
+        if net.op == "nandinv":
             choice += (rng.getrandbits(1),)
         if net.op == "mix":
             choice += (rng.getrandbits(1),)
@@ -402,7 +429,9 @@ def circuit_json(net: "Net", wiring: list[tuple[int, int]], base_layer: int,
             index = pos[(layer, node)]
             cands = net.gates[index]["cands"]
             index_a, index_b = wiring[index][0], wiring[index][1]
-            if net.op == "nand" or (net.op == "mix" and not wiring[index][3]):
+            if net.op == "nandinv":
+                op = "and" if wiring[index][2] else "nand"
+            elif net.op == "nand" or (net.op == "mix" and not wiring[index][3]):
                 op = "nand"
             else:
                 # bias 0 is XOR, bias 1 is XNOR -- the same gate with the
@@ -424,6 +453,8 @@ def eval_circuit(circuit: dict, inputs: list[int]) -> list[int]:
         a, b = wires[gate["a"]], wires[gate["b"]]
         if gate["op"] == "nand":
             wires[n + 2 + i] = 0 if (a and b) else 1
+        elif gate["op"] == "and":
+            wires[n + 2 + i] = 1 if (a and b) else 0
         elif gate["op"] == "xor":
             wires[n + 2 + i] = a ^ b
         elif gate["op"] == "xnor":
@@ -441,6 +472,8 @@ def export_web(net: "Net", assignment: dict[int, bool], names: list[str],
         choice = (read_index(assignment, g["a_bits"]), read_index(assignment, g["b_bits"]))
         if net.op in ("xor3", "mix"):
             choice += (1 if assignment.get(g["bias"], False) else 0,)
+        if net.op == "nandinv":
+            choice += (1 if assignment.get(g["inv"], False) else 0,)
         if net.op == "mix":
             choice += (1 if assignment.get(g["kind"], False) else 0,)
         wiring.append(choice)
@@ -486,19 +519,34 @@ def export_web(net: "Net", assignment: dict[int, bool], names: list[str],
         "trained_codes": trained_codes,
         "used_codes": sorted(set(keys)),
         "glyphs": glyphs_meta,
-        "infeasible": (
-            "Kissat proves no wiring of this shape fits four glyphs: the "
+        "gate": net.op,
+    }
+    if net.op == "nandinv":
+        # The wording is measured, and it differs per gate: do not let a
+        # nandinv circuit ship with the NAND-only claim in its metadata.
+        meta["infeasible"] = (
+            "Six of the eight glyphs fit exactly, and Kissat proves eight is "
+            "impossible for this shape. A NAND-only gate of the same shape "
+            "fits three, and exactly one of the 70 four-glyph subsets."
+        )
+        meta["note"] = (
+            "Each gate is NAND or AND: one extra bit per gate inverts its own "
+            "output, so a gate can hand a complemented wire to its own layer "
+            "instead of spending a gate in the next one. Same shape and the "
+            "same 163 gates as the NAND witness."
+        )
+    else:
+        meta["infeasible"] = (
+            "Kissat proves the four-glyph prefix ABCD cannot fit: the "
             "3-level decoder can compute only 16 of the 256 functions of a "
-            "3-bit key, so each output bit is identical on at least two of "
-            "any four codes."
-        ),
-        "note": (
+            "3-bit key. Of all 70 four-glyph subsets exactly one (CEFG) does."
+        )
+        meta["note"] = (
             "Every gate is NAND, so the circuit is nothing but wire numbers. "
             "The key has 3 bits, which is 8 codes, and only the trained "
             "ones were asked for: the other codes are whatever the decoder "
             "happens to compute there."
-        ),
-    }
+        )
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
     return True
 
@@ -533,6 +581,8 @@ def selftest(solver: str, sizes: list[int], n_patterns: int, timeout: float,
             cnf.add([var if (index_b >> k) & 1 else -var])
         if op in ("xor3", "mix"):
             cnf.add([gate["bias"] if choice[2] else -gate["bias"]])
+        if op == "nandinv":
+            cnf.add([gate["inv"] if choice[2] else -gate["inv"]])
         if op == "mix":
             cnf.add([gate["kind"] if choice[3] else -gate["kind"]])
 
@@ -662,6 +712,55 @@ def function_table(solver: str, sizes: list[int], timeout: float, op: str = "nan
     return len(found)
 
 
+def subset_sweep(sizes: list[int], gate: str, slack: int, solver: str,
+                 timeout: float, size: int) -> int:
+    """Run every subset of ``size`` glyphs, not just the alphabetical prefix.
+
+    The prefix is one sample, and at the margin the answer is data-dependent:
+    under plain NAND exactly one of the 70 four-glyph subsets fits, so quoting
+    "four glyphs is impossible" from the prefix alone was wrong. This mode is
+    what makes the per-gate counts in the docs reproducible.
+    """
+    combos = list(itertools.combinations(list(GLYPHS), size))
+    print(f"subset sweep: {len(combos)} subsets of {size}, gate {gate}, slack {slack}")
+    fitted, refused, other = [], [], []
+    for names in combos:
+        label = "".join(names)
+        patterns = glyphs(list(names), sizes[0])
+        cnf = Cnf()
+        net = Net(sizes, gate)
+        net.build(cnf, patterns, patterns, slack, constrain_outputs=True)
+        workdir = Path(tempfile.mkdtemp(prefix="sat_ae_"))
+        status, elapsed, model = run(solver, cnf, timeout, workdir)
+        shutil.rmtree(workdir, ignore_errors=True)
+        note = ""
+        if status == "sat" and model is not None:
+            wrong_all = 0
+            for name, pattern in zip(names, patterns):
+                recon = simulate(net, model, pattern)
+                wrong = sum(a != b for a, b in zip(recon, pattern))
+                if wrong > slack:
+                    print(f"  BOUND VIOLATED: {label}/{name} has {wrong} "
+                          f"wrong bits, slack is {slack}")
+                wrong_all += wrong
+            note = f" ber {wrong_all / (len(patterns) * len(patterns[0])):.4f}"
+            fitted.append(label)
+        elif status == "unsat":
+            refused.append(label)
+        else:
+            other.append(label)
+        print(f"  {label}: {status} in {elapsed:.1f}s{note}")
+    print(f"summary: sat {len(fitted)}/{len(combos)}, unsat {len(refused)}, "
+          f"other {len(other)}")
+    if fitted:
+        print("  sat: " + " ".join(fitted))
+    if refused:
+        print("  unsat: " + " ".join(refused))
+    if other:
+        print("  other: " + " ".join(other))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -674,15 +773,19 @@ def main() -> int:
                              "first --patterns of ABCDEFGH)")
     parser.add_argument("--slack", type=int, default=0,
                         help="maximum wrong output bits per pattern")
-    parser.add_argument("--mode", choices=["full", "encoder", "decoder", "selftest", "brute", "functions"],
+    parser.add_argument("--mode", choices=["full", "encoder", "decoder", "selftest", "brute",
+                                          "functions", "subsets"],
                         default="full")
-    parser.add_argument("--gate", choices=["nand", "xor3", "xor2", "mix"], default="nand",
+    parser.add_argument("--gate", choices=["nand", "nandinv", "xor3", "xor2", "mix"], default="nand",
                         help="nand = NAND(a,b); xor3 = XOR(a,b) plus a SAT-chosen "
                              "bias bit per gate (affine over GF(2)); xor2 = plain "
-                             "2-input XOR, no bias; mix = a free type bit per gate "
-                             "choosing NAND or XOR^bias")
+                             "2-input XOR, no bias; nandinv = NAND with a free "
+                             "per-gate output inversion (so NAND or AND); mix = a "
+                             "free type bit per gate choosing NAND or XOR^bias")
     parser.add_argument("--solver", default="kissat", help="SAT solver binary")
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--subset-size", type=int, default=4,
+                        help="glyphs per subset for --mode subsets (default 4)")
     parser.add_argument("--keep", help="copy the CNF here for inspection")
     parser.add_argument("--export", metavar="DIR",
                         help="write the witness as browser circuits + meta.json")
@@ -706,6 +809,9 @@ def main() -> int:
     if args.mode == "functions":
         function_table(args.solver, sizes, args.timeout, args.gate)
         return 0
+    if args.mode == "subsets":
+        return subset_sweep(sizes, args.gate, args.slack, args.solver,
+                            args.timeout, args.subset_size)
 
     names = list(args.glyphs) if args.glyphs else list(GLYPHS)[: args.patterns]
     unknown = [n for n in names if n not in GLYPHS]

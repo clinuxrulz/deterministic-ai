@@ -1331,6 +1331,7 @@ type SatMeta = {
   trained_codes: string[];
   used_codes: string[];
   glyphs: SatGlyph[];
+  gate?: string;
   infeasible: string;
   note: string;
 };
@@ -1499,9 +1500,10 @@ function SatLab() {
         <h2>A solver chose these wires.</h2>
         <p class="hint">
           No gradients and no weights: Kissat picked both input wires of each of the{" "}
-          {meta()?.gates ?? 163} NAND gates, and it proved no wiring of this shape fits
-          four of these glyphs. Click a letter to run it through the encoder, then flip a
-          key bit to decode a code that was never trained on.
+          {meta()?.gates ?? 163} NAND gates, and it proved the four-glyph prefix cannot
+          fit — of all 70 four-glyph subsets exactly one can. Click a letter to run it
+          through the encoder, then flip a key bit to decode a code that was never
+          trained on.
         </p>
       </div>
 
@@ -1629,6 +1631,194 @@ function SatLab() {
         </div>
         <p class="hint">{meta()?.infeasible}</p>
       </div>
+
+      <SatInvert />
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The same shape, one bit richer per gate: NAND or AND. Same 163 gates, but a
+// gate may invert its own output, so a complemented wire does not have to be
+// paid for in the next layer. Six glyphs fit exactly instead of three.
+// ---------------------------------------------------------------------------
+
+function SatInvert() {
+  const params = new URLSearchParams(window.location.search);
+  let encoderJson = "";
+  let decoderJson = "";
+  let loaded: SatMeta | null = null;
+  let reconRef: HTMLCanvasElement | undefined;
+
+  const [meta, setMeta] = createSignal<SatMeta | null>(null);
+  const [status, setStatus] = createSignal("loading the second circuit…");
+  const [code, setCode] = createSignal("000");
+  const [selected, setSelected] = createSignal<string | null>(null);
+  const [recon, setRecon] = createSignal<number[]>([]);
+
+  /** Redraw from an explicit value: signal reads here would be stale. */
+  const show = (next: string, label?: string) => {
+    if (decoderJson === "") return;
+    const out = Array.from(
+      run_circuit(decoderJson, Uint8Array.from([...next].map((c) => (c === "1" ? 1 : 0)))),
+    );
+    setCode(next);
+    setRecon(out);
+    drawGlyph(reconRef, out, loaded?.side ?? 8);
+    setStatus(label ?? `key ${next} · decoded`);
+  };
+
+  const encodeGlyph = (glyph: SatGlyph) => {
+    if (encoderJson === "") return;
+    const key = Array.from(run_circuit(encoderJson, Uint8Array.from(glyph.bits)));
+    const bits = key.map((bit) => (bit ? "1" : "0")).join("");
+    setSelected(glyph.name);
+    const note = glyph.trained ? "trained, exact" : `${glyph.wrong_bits} bits wrong`;
+    show(bits, `encode ${glyph.name} → key ${bits} · ${note}`);
+  };
+
+  const heldOut = createMemo(() => (meta()?.glyphs ?? []).filter((glyph) => !glyph.trained));
+
+  const mismatch = createMemo(() => {
+    const name = selected();
+    const out = recon();
+    const glyph = (meta()?.glyphs ?? []).find((entry) => entry.name === name);
+    if (!glyph || out.length === 0) return null;
+    let wrong = 0;
+    for (let i = 0; i < out.length; i += 1) if (out[i] !== glyph.bits[i]) wrong += 1;
+    return wrong;
+  });
+
+  onSettled(() => {
+    void (async () => {
+      try {
+        const [metaJson, circuit] = await Promise.all([
+          fetchJson<SatMeta>(asset("sat/nandinv/meta.json")),
+          fetchJson<SatCircuits>(asset("sat/nandinv/circuit.json")),
+        ]);
+        await wasmReady;
+        encoderJson = JSON.stringify(circuit.encoder);
+        decoderJson = JSON.stringify(circuit.decoder);
+        loaded = metaJson;
+        setMeta(metaJson);
+
+        const first = metaJson.trained_codes[0] ?? codeBits(0, metaJson.key_bits);
+
+        if (params.get("selftest") === "1") {
+          const trained = metaJson.glyphs.filter((glyph) => glyph.trained);
+          let exact = 0;
+          for (const glyph of trained) {
+            const key = run_circuit(encoderJson, Uint8Array.from(glyph.bits));
+            const out = run_circuit(decoderJson, key);
+            let wrong = 0;
+            for (let i = 0; i < out.length; i += 1) if (out[i] !== glyph.bits[i]) wrong += 1;
+            if (wrong === 0) exact += 1;
+          }
+          show(first);
+          setStatus(
+            `self-test · ${exact}/${trained.length} glyphs round-trip exactly · ` +
+              `${metaJson.gates} gates · keys ${metaJson.trained_codes.join(" ")}`,
+          );
+          return;
+        }
+        show(first);
+      } catch (error) {
+        setStatus(`could not load the inverting circuit: ${String(error)}`);
+      }
+    })();
+  });
+
+  return (
+    <div class="sat-inv">
+      <div class="sat-head">
+        <h2>One more bit per gate, and six glyphs fit.</h2>
+        <p class="hint">
+          Same shape, same {meta()?.gates ?? 163} gates, but each gate may also invert its
+          own output — NAND or AND. A gate can then hand a complemented wire to its own
+          layer instead of spending a whole gate in the next one, so the decoder reaches 58
+          of the 256 functions of a 3-bit key instead of 16. Six of the eight glyphs now
+          fit exactly, and all 70 four-glyph subsets fit where NAND fits one of the 70.
+        </p>
+      </div>
+
+      <div class="sat-panel">
+        <div class="sat-glyphs">
+          <For each={meta()?.glyphs ?? []}>
+            {(glyph) => (
+              <button
+                class={selected() === glyph.name ? "sat-glyph on" : "sat-glyph"}
+                onClick={() => encodeGlyph(glyph)}
+                title={glyph.trained ? `${glyph.name}: trained` : `${glyph.name}: held out`}
+              >
+                <canvas class="sattile" ref={(el) => drawGlyph(el, glyph.bits, meta()?.side ?? 8)} />
+                <span class="sattile-label">
+                  <strong>{glyph.name}</strong>
+                  <em class={glyph.trained ? "sat-trained" : undefined}>
+                    {glyph.trained ? `${glyph.code} · trained` : glyph.code}
+                  </em>
+                </span>
+              </button>
+            )}
+          </For>
+        </div>
+        <p class="hint">
+          Six glyphs were trained, one per code. The {heldOut().length} held-out glyphs
+          land on codes that were trained on, so all eight images decode from six codes —
+          the code space is doing the work, not a lookup table of eight.
+        </p>
+      </div>
+
+      <div class="sat-side">
+        <div class="sat-key">
+          <span class="sat-keyhead">key</span>
+          <For each={Array.from({ length: meta()?.key_bits ?? 3 }, (_, i) => i)}>
+            {(bit) => (
+              <button
+                class="sat-bit"
+                onClick={() => {
+                  setSelected(null);
+                  const next = [...code()];
+                  next[bit] = next[bit] === "1" ? "0" : "1";
+                  show(next.join(""));
+                }}
+                title={`flip key bit ${bit}`}
+              >
+                {code()[bit]}
+                <em>k{bit}</em>
+              </button>
+            )}
+          </For>
+        </div>
+
+        <span class="sat-keyhead">decoder output · key {code()}</span>
+        <canvas ref={reconRef} class="sat-recon" width={64} height={64} />
+        <p class="status">{status()}</p>
+        <Show when={mismatch() !== null && selected() !== null}>
+          <p class="hint">
+            {mismatch()} of {recon().length} bits differ from {selected()}.
+          </p>
+        </Show>
+
+        <div class="ganstats">
+          <div>
+            <span>gates</span>
+            <strong>{meta() ? meta()!.gates : "–"}</strong>
+          </div>
+          <div>
+            <span>key</span>
+            <strong>{meta() ? `${meta()!.key_bits} bits` : "–"}</strong>
+          </div>
+          <div>
+            <span>gate</span>
+            <strong>{meta()?.gate ?? "nandinv"}</strong>
+          </div>
+          <div>
+            <span>shape</span>
+            <strong>{meta()?.shape ?? "–"}</strong>
+          </div>
+        </div>
+        <p class="hint">{meta()?.note}</p>
+      </div>
+    </div>
   );
 }

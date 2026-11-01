@@ -1265,7 +1265,7 @@ over-constrained CNF produces confident, false UNSATs. Four checks:
    So an UNSAT is never the encoder's fault at these sizes.
 4. **Two solvers.** Kissat and CaDiCaL agree on every CNF that was kept.
 
-Four real bugs were found this way, which is the argument for the checks:
+Six real bugs were found this way, which is the argument for the checks:
 
 - **The soft-equality clause was one-directional.** `sel -> (out = target)` with
   no converse lets the solver leave every selector false, so the cardinality
@@ -1291,6 +1291,12 @@ Four real bugs were found this way, which is the argument for the checks:
   that *satisfies* the parity instead of the one that violates it. Round-trip
   selftest failed immediately -- a witness exists by construction, so any UNSAT
   is the encoder's fault -- and the fix is to negate that literal pattern.
+- **The `nandinv` NAND clauses were left unguarded.** Once a gate had an `inv`
+  bit, the three NAND clauses had to be disabled when it was set, and they were
+  not: every gate was forced to be NAND *and* AND at once, so the one-pattern
+  selftest came back UNSAT on an instance that is satisfiable by construction.
+  The guards are `[inv]` for the NAND clauses and `[-inv]` for the AND ones,
+  the same pattern `mix` uses for its type bit.
 
 `--mode selftest` now also runs a slack case: it corrupts a witness's target by
 exactly `slack` bits and requires the instance to be SAT *and* every pattern's
@@ -1538,11 +1544,77 @@ the solver says so in both regimes. The slack-5 UNSAT took 420 s against a 420 s
 timeout, so it is a proof that only just landed; slack 6 SAT is the load-bearing
 number.
 
-Verdict: NAND stays. The bias pin is a real improvement on plain XOR -- one more
-glyph, twice the function space, and it is what makes the gate "EQ or NEQ"
-rather than a pure parity tree -- but it is a strictly smaller class than the one
-the project already uses, so there is nothing here to ship. The axis it opens,
-gate *type* chosen by the solver, is worth keeping: see `mix` above.
+Verdict: NAND stays, and XOR does not. The bias pin is a real improvement on
+plain XOR -- one more glyph, twice the function space, and it is what makes the
+gate "EQ or NEQ" rather than a pure parity tree -- but it is a strictly smaller
+class than the one the project already uses, so there is nothing here to ship.
+The axis it opens, gate *type* chosen by the solver, is worth keeping: see `mix`
+above, and the section below for the one variant that does beat NAND.
+
+### One inversion bit per gate: NAND or AND
+
+The gate change that pays is not a new gate. Keep NAND, add one bit per gate
+that inverts its output, so a gate is `NAND(a,b)` or `AND(a,b)`: `--gate
+nandinv`.
+
+The prediction is available before any measurement, and it is about *where* the
+inversion is spent. `AND(x,y) = NOT NAND(x,y)`, so this adds nothing to the
+function class -- a NAND-only net can compute AND, it just has to spend a gate in
+the next layer to invert the result. The last layer has no next layer: it can
+only produce `NAND(u,v)`, and `AND(u,v)` is that thing complemented. So every
+output bit that wants the complement of a two-wire AND had nowhere to get it,
+which is exactly what the depth-3 decoder is short of.
+
+Measured, on the same 163-gate shape:
+
+- decoder functions of a 3-bit key: **58 of 256** (NAND 16, XOR+bias 8);
+- exact fit for **1-6 glyphs** (NAND stops at 3; six takes 6.1 s). Every subset
+  of six or fewer fits: 70/70 at four glyphs, 56/56 at five, 28/28 at six, and
+  the seven-glyph prefix is UNSAT in 43.8 s where NAND cannot fit four of the
+  prefix at all. The enumeration is `--mode subsets`, so these are counts over
+  all subsets rather than samples of the prefix;
+- the same 70 four-glyph subsets that NAND fits **1 of** fit **70 of** here;
+- at eight glyphs the minimum slack is **1 wrong bit per pattern**, BER
+  **0.0156** -- 8 wrong bits out of 512 -- found in 485 s.
+
+The last line is the result. NAND's minimum at eight glyphs is slack 8, its
+witness there has 60 wrong bits, and every smaller slack is UNSAT. So the same
+wiring budget produces 8 wrong bits instead of 60, 7.5x less error, and it is
+not a tuning difference: one circuit can produce the complement its output layer
+needs and the other cannot. The 58-of-256 count is the same fact in one number.
+
+Frontier, exact fit (slack 0):
+
+| glyphs | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| NAND | SAT | SAT | SAT | UNSAT\* | UNSAT | UNSAT | UNSAT | UNSAT |
+| NAND or AND | SAT | SAT | SAT | SAT | SAT, 1.2 s | SAT, 6.1 s | UNSAT, 43.8 s | UNSAT, 20.4 s |
+
+\* the four-glyph *prefix* only: CEFG does fit, which is the one subset of 70.
+
+Slack at eight glyphs (minimum wrong bits per pattern; BER is the witness found
+at that bound):
+
+| slack | 1 | 2 | 3 | 4 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|
+| NAND | UNSAT | UNSAT | UNSAT | UNSAT | UNSAT | UNSAT | SAT, 291 s, 0.1172 |
+| NAND or AND | SAT, 485 s, **0.0156** | SAT, 418 s, 0.0312 | SAT, 31 s, 0.0430 | SAT, 2.9 s, 0.0605 | SAT, 15 s, 0.0898 | SAT, 4.4 s, 0.1016 | SAT, 2.1 s, 0.1172 |
+
+One methodological caution, because it changes how to read that table. `--slack`
+is a feasibility bound, not an objective: Kissat returns the first witness inside
+the budget, so a run's BER is not monotone in the budget and must not be read as
+"the best at that slack". The `nandinv` run at slack 8 returns 0.1172, the same
+number the NAND witness has at its own minimum, even though the same gate at
+slack 4 found 0.0605. The looser CNF simply admits worse witnesses and the solver
+stopped at one. The load-bearing numbers are the *minimum* slack and the BER
+found there, where the bound is tight; the true minimum error needs MaxSAT.
+
+Cost, in the terms of the next section: an AND cell is a NAND plus an inverter,
+so this is not free. The exported six-glyph witness is 78 AND and 85 NAND gates,
+**808 transistors against 652** for the all-NAND three-glyph witness, +24%. That
+is the trade the demo now shows -- 24% more silicon, three more glyphs exact, and
+a seventh of the error at eight -- and it is the first gate-type result in this
+checkpoint that is worth shipping rather than recording.
 
 ### What a gate costs in transistors
 
@@ -1663,6 +1735,16 @@ it.
   134 and from "four glyphs UNSAT" to "four glyphs exact in 0.8 s". So NAND-only
   is where the wall is hardest, and the wall is not a property of the wiring
   alone -- which is a correction to this checkpoint, not a footnote.
+- **The useful direction on the gate axis was inversion, not XOR.** One bit per
+  gate that inverts its own output (`--gate nandinv`) takes the decoder from 16
+  functions of a 3-bit key to **58**, the exact frontier from three glyphs to
+  **six**, the 70 four-glyph subsets from 1 to **70**, and the eight-glyph error
+  from 60 wrong bits to **8** -- for 24% more transistors (AND is NAND plus an
+  inverter). The reason is structural rather than lucky: the last layer cannot
+  pay for an inversion, so a gate that can is worth more than a gate that
+  computes a different function. That is also the SAT-side evidence for open
+  thread 6 in `AGENTS.md`: the shipped model spends 42% of its gates on
+  `Nand(x,x)`.
 - **Infeasibility is cheap to prove and expensive to guess.** The gradient
   trainer's failure on a shape looks identical to an optimiser problem; the SAT
   answer distinguishes them in a tenth of a second, and slack turns it into a
@@ -1716,6 +1798,14 @@ python3 scripts/sat_ae.py --solver $K --gate xor3 --patterns 4       # UNSAT
 python3 scripts/sat_ae.py --solver $K --gate xor2 --patterns 3       # UNSAT
 python3 scripts/sat_ae.py --solver $K --gate mix  --patterns 4       # SAT, 0.8 s
 python3 scripts/sat_ae.py --solver $K --gate mix --mode functions --shape 3,16,32,64
+
+# the gate change that pays: NAND, or AND when the inversion bit is set
+python3 scripts/sat_ae.py --solver $K --gate nandinv --patterns 6          # SAT, 6.1 s
+python3 scripts/sat_ae.py --solver $K --gate nandinv --patterns 8          # UNSAT
+python3 scripts/sat_ae.py --solver $K --gate nandinv --patterns 8 --slack 1  # SAT, 485 s
+python3 scripts/sat_ae.py --solver $K --mode subsets --subset-size 4 --gate nandinv
+python3 scripts/sat_ae.py --solver $K --mode subsets --subset-size 4 --gate nand
+python3 scripts/sat_ae.py --solver $K --gate nandinv --mode functions --shape 3,16,32,64
 
 # which four glyphs fit, rather than only the prefix
 python3 scripts/sat_ae.py --solver $K --glyphs CEFG --patterns 4     # SAT

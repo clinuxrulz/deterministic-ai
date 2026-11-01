@@ -61,6 +61,14 @@ other four are codes nothing asked for that still decode to definite images.
 `?tab=sat&selftest=1` requires all three trained glyphs to round-trip with zero
 wrong bits and prints `self-test · 3/3 ...` — that is the headless check.
 
+Below that witness the tab shows a second one, `--gate nandinv` exported to
+`web/public/sat/nandinv/`: the same 163-gate shape where each gate may also
+invert its own output (NAND or AND). Six of the eight glyphs fit exactly there,
+so it has eight glyph buttons and three key bits, and its self-test prints
+`self-test · 6/6 glyphs round-trip exactly · 163 gates · keys ...`. It loads
+through the same `run_circuit`; `and` is an existing `Op`, so no wasm rebuild is
+needed for it. Both blocks must pass for `?tab=sat&selftest=1`.
+
 Note for Solid 2.0: signal writes are scheduled, so reading a signal immediately
 after setting it returns the stale value. Pass values explicitly instead (the
 GAN tab's `generate(meta)` does this), or compute the display string from a
@@ -292,7 +300,7 @@ cargo run --release -p xorae -- export \
 | `crates/cli/src/ga.rs` | Genetic algorithm, fitness, evaluation |
 | `crates/cli/src/dataset.rs` | CIFAR loader, planar fix, `XAE4` format, palette/colour modes |
 | `crates/wasm/src/lib.rs` | `wasm-bindgen` bridge |
-| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions` modes, `--gate {nand,xor3,xor2}`, `--glyphs`/`--slack`/`--export` |
+| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions`/`subsets` modes, `--gate {nand,nandinv,xor3,xor2,mix}`, `--glyphs`/`--slack`/`--export` |
 | `scripts/circuit_cones.py` | exact dependency cones of every wire: what an output *can* depend on |
 | `scripts/make_glyph_dataset.py` | writes the 8×8 glyphs as `XAE4` so `train-nand` can train on the same data |
 | `web/src/App.tsx` | Solid 2.0 UI |
@@ -394,7 +402,22 @@ answer for the shipped 32×32 model is hostile: every decoder output sees at mos
 reads only **362 of 1,024** input pixels. That is the same ceiling as the glyph
 result, in a form that can be measured at any key size.
 
-**`--gate {nand,xor3,xor2}` swaps the gate.** `xor3` is two wires plus a
+**`--gate nandinv` is the gate change that pays.** One extra bit per gate
+inverts that gate's output, so a gate is `NAND(a,b)` or `AND(a,b)`. That adds no
+function to the class — `AND(x,y) = NOT NAND(x,y)`, and a NAND-only net can build
+AND by spending a gate in the *next* layer — but the output layer has no next
+layer, which is exactly the resource the depth-3 decoder was missing. Measured:
+**58 of 256** functions of a 3-bit key (NAND: 16), exact fit for **1–6 glyphs**
+(NAND: 1–3; six in 6.1 s), **every subset of six or fewer** (70/70 at four,
+56/56 at five, 28/28 at six, against NAND's 1 of 70 at four), and at eight
+glyphs the minimum slack is **1 wrong bit per pattern** — BER **0.0156**,
+8 wrong bits in 512 — against NAND's slack 8 and BER 0.1172 (60 bits). Same
+shape, same 163 gates. It is not free in silicon: an AND cell is a NAND plus an
+inverter, so the exported six-glyph witness (78 AND, 85 NAND) is **808T against
+652T** for the all-NAND witness, +24%, and it is what the demo's solver tab now
+shows below the NAND one.
+
+**`--gate {xor3,xor2}` is the negative side of the same axis.** `xor3` is two wires plus a
 per-gate bias bit the solver also chooses (so each gate is XOR or XNOR, and the
 net is affine over GF(2)); `xor2` is the same without the bias. The result is a
 clean loss, and it is a *count* rather than a BER: the decoder can compute only
@@ -408,8 +431,10 @@ and the constants a gate can make are outputs of the same layer). Every wire
 therefore stays in `span{1, k0⊕k1, k0⊕k2, k1⊕k2}` at any depth — 8 functions;
 the bias buys the complements, taking 4 to 8. A decoder input pinned to 0 would
 buy the other doubling and reach all 16 affine functions, i.e. at best tie NAND.
-Five bugs have now been caught by selftest; the fifth was this gate's parity
-clauses forbidding the satisfying assignment instead of the violating one.
+Six bugs have now been caught by selftest; the fifth was the XOR parity clauses
+forbidding the satisfying assignment instead of the violating one, and the sixth
+was `nandinv`'s NAND clauses left unguarded, so every gate was forced to be NAND
+*and* AND at once.
 
 **`--gate mix` is the control that matters, and it corrects the checkpoint.** A
 free type bit per gate (`NAND(a,b)` or `XOR(a,b) XOR bias`) takes the same
@@ -501,7 +526,11 @@ Do not spend time re-running these.
    distinct wires. A trainer that lets a gate consume an inverted wire for free
    (AIG-style) would spend its gate budget on real logic instead of negation —
    plausibly the largest remaining win, but it touches the model format, the
-   evaluator and the exporter.
+   evaluator and the exporter. **There is now SAT evidence for this**: letting a
+   gate invert its own output (`--gate nandinv`) cuts the eight-glyph minimum
+   from 8 wrong bits per pattern to 1 and the exact frontier from 3 glyphs to 6,
+   on the same 163 gates. That is a gate-level inversion, not a free wire
+   inversion, so it is a lower bound on what AIG-style would buy.
 7. **Seed-averaged reporting for everything else.** The default config now has
    five seeds (0.1730 ± 0.0066) and runs are deterministic, so the harness is
    established. Re-measure the colour and wide configs the same way (5 seeds,
