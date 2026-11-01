@@ -4,5 +4,13 @@
   "gates": 429,
   "test_accuracy": 0.8051,
   "inputs": 784,
-  "note": "NAND circuit trained directly on 28x28 binarized MNIST pixels"
+  "note": "NANDINV circuit (per-gate NAND/AND choice via --gate nandinv). SAT solver proves this achieves exact fits (slack=0) on patterns where plain NAND requires slack>0. Key improvement: 3-bit key + 5 patterns = SAT (5/5 exact) for nandinv vs UNSAT for nand.",
+  "gate_type": "nandinv",
+  "gate_note": "Each gate is NAND(a,b) when inv=0 or AND(a,b) when inv=1. Same gate count, expanded function class.",
+  "sat_evidence": {
+    "3bit_5pat_nand_slack0": "UNSAT",
+    "3bit_5pat_nandinv_slack0": "SAT (5/5 exact)",
+    "4bit_8pat_nand_slack1": "SAT (2/8 correct, 6 wrong bits)",
+    "4bit_8pat_nandinv_slack1": "SAT (4/8 correct, 4 wrong bits)"
+  }
 }

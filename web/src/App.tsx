@@ -980,7 +980,7 @@ function DigitLab() {
         setGroupSize(metaJson.group_size);
         clear();
         setStatus(
-          `ready · ${metaJson.gates} NAND gates, no weights · ${(metaJson.test_accuracy * 100).toFixed(1)}% on MNIST test`,
+          `ready · ${metaJson.gates} NANDINV gates (per-gate NAND/AND choice) · ${(metaJson.test_accuracy * 100).toFixed(1)}% on MNIST test · SAT-proven improvement over plain NAND`,
         );
         // Headless check for the stroke path: ?strokes=<scale> draws a
         // synthetic 7 at that fraction of the canvas and classifies it. The

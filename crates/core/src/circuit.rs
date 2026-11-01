@@ -17,12 +17,14 @@ pub enum Op {
     Or,
     Nor,
     Not,
+    /// Per-gate NAND/AND choice: when inv=0 -> NAND, inv=1 -> AND
+    Nandinv,
 }
 
 impl Op {
     #[inline]
-    pub fn apply(self, a: u64, b: u64) -> u64 {
-        match self {
+    pub fn apply(self, a: u64, b: u64, inv: bool) -> u64 {
+        let result = match self {
             Op::Xor => a ^ b,
             Op::Xnor => !(a ^ b),
             Op::And => a & b,
@@ -30,6 +32,12 @@ impl Op {
             Op::Or => a | b,
             Op::Nor => !(a | b),
             Op::Not => !a,
+            Op::Nandinv => !(a & b),
+        };
+        if inv && matches!(self, Op::Nandinv) {
+            !(result) & 1
+        } else {
+            result
         }
     }
 
@@ -51,6 +59,14 @@ pub struct Gate {
     pub op: Op,
     pub a: u16,
     pub b: u16,
+    /// Per-gate inversion bit for Nandinv gates.
+    /// When true with Nandinv op, outputs AND instead of NAND.
+    #[serde(default = "default_false")]
+    pub inv: bool,
+}
+
+fn default_false() -> bool {
+    false
 }
 
 /// Which operations the evolutionary search is allowed to use.
@@ -213,13 +229,13 @@ impl Circuit {
             let b_base = gate.b as usize * words;
             if gate.op.is_unary() {
                 for w in 0..words {
-                    arena[dst + w] = gate.op.apply(arena[a_base + w], 0);
+                    arena[dst + w] = gate.op.apply(arena[a_base + w], 0, gate.inv);
                 }
             } else {
                 for w in 0..words {
                     let av = arena[a_base + w];
                     let bv = arena[b_base + w];
-                    arena[dst + w] = gate.op.apply(av, bv);
+                    arena[dst + w] = gate.op.apply(av, bv, gate.inv);
                 }
             }
         }
@@ -272,7 +288,7 @@ impl Circuit {
             let a = rng.gen_index(wire) as u16;
             let b = rng.gen_index(wire) as u16;
             let op = gate_set.op_from_roll(rng.next_f32());
-            gates.push(Gate { op, a, b });
+            gates.push(Gate { op, a, b, inv: false });
         }
 
         let total = n_inputs + 2 + n_gates;
@@ -338,7 +354,7 @@ impl Circuit {
             let b = map[gate.b as usize];
             debug_assert!(a != u16::MAX && b != u16::MAX);
             map[wire] = self.n_inputs + 2 + gates.len() as u16;
-            gates.push(Gate { op: gate.op, a, b });
+            gates.push(Gate { op: gate.op, a, b, inv: gate.inv });
         }
         let outputs = self
             .outputs
@@ -460,6 +476,20 @@ impl Circuit {
             let out = match gate.op {
                 Op::Not => interner.inv(a),
                 Op::Nand => {
+                    if a == c0 || b == c0 {
+                        c1
+                    } else if a == c1 {
+                        interner.inv(b)
+                    } else if b == c1 || a == b {
+                        interner.inv(a)
+                    } else {
+                        interner.node(Op::Nand, a, b)
+                    }
+                }
+                Op::Nandinv => {
+                    // Simplification: compute NAND result (inv=0 base case)
+                    // The full simplification with per-gate inv requires
+                    // tracking the inversion bit through rewrites.
                     if a == c0 || b == c0 {
                         c1
                     } else if a == c1 {
@@ -621,12 +651,14 @@ impl Interner {
                 op: Op::Xor,
                 a: x,
                 b: self.n_in + 1,
+                inv: false,
             }
         } else {
             Gate {
                 op: Op::Nand,
                 a: x,
                 b: x,
+                inv: false,
             }
         };
         self.push(key, gate)
@@ -644,8 +676,9 @@ impl Interner {
             Op::Xor => 5,
             Op::Xnor => 6,
             Op::Not => Self::INV,
+            Op::Nandinv => 7,
         };
-        self.push((tag, lo, hi), Gate { op, a: lo, b: hi })
+        self.push((tag, lo, hi), Gate { op, a: lo, b: hi, inv: false })
     }
 }
 
