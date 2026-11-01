@@ -583,6 +583,74 @@ button:focus,
   }
 }
 
+/* Glyph GAN tab: every code of a solver-chosen generator circuit, at once. */
+.glyphfamily {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.glyphfamily-label {
+  width: 14px;
+  flex: none;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--muted, #8b93a7);
+  text-align: center;
+}
+
+.glyphgrid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.glyphtile {
+  display: block;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--line, #2a2f3a);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.glyphtile.trained {
+  border-color: rgba(110, 168, 254, 0.5);
+}
+
+.glyphtile:hover,
+.glyphtile.on {
+  border-color: var(--accent, #6ea8fe);
+}
+
+.glyphtile.on {
+  background: rgba(110, 168, 254, 0.12);
+}
+
+.glyphcanvas {
+  width: 100%;
+  aspect-ratio: 1;
+  display: block;
+  border-radius: 3px;
+  background: #0b0d12;
+  image-rendering: pixelated;
+}
+
+.glyph-detail {
+  width: 160px;
+  height: 160px;
+  display: block;
+  border-radius: 10px;
+  border: 1px solid var(--line, #2a2f3a);
+  background: #0b0d12;
+  image-rendering: pixelated;
+}
+
 /* SAT tab: solver-chosen wiring, and a key space you can walk through. */
 .satlab {
   display: grid;
@@ -782,6 +850,15 @@ button:focus,
 
   .sat-inv {
     grid-template-columns: 1fr;
+  }
+
+  .glyphfamily {
+    gap: 4px;
+  }
+
+  .glyph-detail {
+    width: 120px;
+    height: 120px;
   }
 
   .sat-glyphs {

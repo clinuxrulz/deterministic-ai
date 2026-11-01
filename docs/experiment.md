@@ -1621,6 +1621,101 @@ is the trade the demo now shows -- 24% more silicon, three more glyphs exact, an
 a seventh of the error at eight -- and it is the first gate-type result in this
 checkpoint that is worth shipping rather than recording.
 
+### A generator, not an autoencoder: the Glyph GAN
+
+The same solver can be asked to *generate* rather than fit. `--mode generate`
+keeps the decoder (`key -> 16 -> 32 -> 64`), drops the targets, pins each of the
+`2**k` codes to its own key, and constrains the outputs with a predicate instead
+of a picture:
+
+- ink density inside the range the alphabet uses (0.33-0.61; real glyphs span
+  0.375-0.562);
+- every row and every column has at least one ink pixel;
+- no isolated ink pixel;
+- every horizontal ink run is one of the lengths the alphabet itself uses --
+  2, 3, 4, 5 or 8, calibrated from `GLYPHS` at run time, never hard-coded;
+- at least `--distance` bits from every one of the eight glyphs;
+- all codes pairwise distinct.
+
+This is a GAN only in the loosest sense: the discriminator is that predicate,
+written by hand. There is no adversary and nothing is learned, so "looks like a
+letter" is exactly as strong as the rules above -- which is the point of the
+experiment, because that turns out to be the binding constraint.
+
+**The predicate alone does not produce letters.** With no letters pinned, the
+solver satisfies every clause and returns texture. Measured at 3, 4 and 5 bits
+(8, 16 and 32 codes): all images are distinct, all sit in the ink range, all use
+legal run lengths, and all are **22-31 bits from any real glyph**. A rule that
+accepts all eight glyphs also accepts dense texture, because it describes *drawn
+strokes*, not *a letter*. Style is not a bitwise predicate at this size.
+
+**Pinning letters is what makes the free codes a typeface.** `--letters 4`
+forces the first four codes to A-D exactly and holds the rest to the predicate.
+Every one of the 28 free codes then comes back as a glyph that reads as a letter
+and is in no alphabet, arranged as four families of eight:
+
+```
+A  [A] [A with a bar] [A with a serif] ...        (7 new)
+B  [B] ...                                        (7 new)
+C  [C] ... several read as G or a euro sign       (7 new)
+D  [D] ...                                        (7 new)
+```
+
+Four is the most this shape allows: `--letters 5` is UNSAT at both 4 and 5 bits
+(1.6 s, 4.8 s), `--letters 6` is UNSAT at 3 bits (0.4 s, where six glyphs fit
+*without* the predicate -- the two spare codes cannot satisfy it), and 4-bit
+`--letters 2/3/4` are SAT in 1.9/3.2/2.7 s.
+
+The shipped generator is the 5-bit one (`5-16-32-64`, 32 codes), SAT in 46 s
+over 211k variables and 553k clauses, **112 gates, 554 transistors** (53 AND,
+59 NAND). Solve time on this phone is load-dependent: re-running the identical
+CNF takes 46 s or 189 s and returns the same witness, so treat that pair as a
+range, not as a discrepancy.
+
+**`--distance` is what stops the answer being a typo.** With the default 1 the
+cheapest way to satisfy "not a glyph" is to flip one pixel, so all 28 came back
+as a pinned letter with a bit moved -- indistinguishable from the letter, which
+is not a new letter. At `--distance 4` they are distinct shapes:
+
+| `--distance` | result | new glyphs' distance to nearest letter |
+|---|---|---|
+| 1 | SAT 31 s | 1-9 bits (typos) |
+| 4 | SAT 46 s | 4-14 bits, median 9 |
+| 8 | SAT 93 s | up to 22 bits |
+| 12 | SAT 211 s | up to 19 bits (texture starts) |
+
+**26 of the 28 are at least 5 bits from every letter**, which is as far as C is
+from G and further than E is from F -- so by the alphabet's own spacing they are
+not near-duplicates. That is the number that makes "not in the alphabet" mean
+something.
+
+**Why it is a typeface and not new letters.** The cone analysis of the exported
+circuit (64 outputs, 5 inputs, 112 gates; cone size 1-3 bits per output) says
+three of the five latent bits barely reach the image:
+
+| latent bit | output pixels it can reach | rows |
+|---|---|---|
+| k0 | 54 / 64 | all |
+| k1 | 40 / 64 | 2-7 |
+| k2 | **5 / 64** | 0 |
+| k3 | 14 / 64 | 1-2 |
+| k4 | **9 / 64** | 0-1 |
+
+So k0/k1 carry the letter and k2/k3/k4 repaint its top. Every family member
+therefore shares its body with the pinned letter, which is exactly why the grid
+reads as one typeface rather than as new letter identities. This is the same
+ceiling as the shipped 32x32 model -- decoder outputs that see at most 7 of 128
+key bits -- showing up in 112 gates. More latent does not help: 5 bits with 5
+pinned letters is already UNSAT.
+
+**What this does not show.** It is not evidence that the shape can generate
+*arbitrary* letter-like shapes, only that 4 fitted letters plus a rule produce
+28 letter-like variants. The rule is doing the work of a discriminator, and the
+experiment's honest summary is that a hand-written 64-bit predicate is not a
+discriminator: it accepts texture and it accepts typefaces, and only the pinned
+alphabet decides which. It is shipped in the demo as *Glyph GAN* because the
+output is legible and interactive, not because the method generalises.
+
 ### What a gate costs in transistors
 
 XOR being "worse per gate" understates it once the unit is a device. Static-CMOS
@@ -1811,6 +1906,15 @@ python3 scripts/sat_ae.py --solver $K --gate nandinv --patterns 8 --slack 1  # S
 python3 scripts/sat_ae.py --solver $K --mode subsets --subset-size 4 --gate nandinv
 python3 scripts/sat_ae.py --solver $K --mode subsets --subset-size 4 --gate nand
 python3 scripts/sat_ae.py --solver $K --gate nandinv --mode functions --shape 3,16,32,64
+
+# generate instead of fit: a 5-bit latent, four letters pinned, 28 new glyphs
+python3 scripts/sat_ae.py --solver $K --mode generate --shape 5,16,32,64 \
+    --gate nandinv --letters 4 --distance 4 --export web/public/gan8
+python3 scripts/sat_ae.py --solver $K --mode generate --shape 5,16,32,64 \
+    --gate nandinv --letters 0                    # texture: the control
+python3 scripts/sat_ae.py --solver $K --mode generate --shape 5,16,32,64 \
+    --gate nandinv --letters 5                    # UNSAT: the ceiling
+python3 scripts/circuit_cones.py web/public/gan8/circuit.json
 
 # which four glyphs fit, rather than only the prefix
 python3 scripts/sat_ae.py --solver $K --glyphs CEFG --patterns 4     # SAT

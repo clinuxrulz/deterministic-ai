@@ -141,6 +141,13 @@ def at_most_k(cnf: Cnf, xs: list[int], k: int) -> None:
         cnf.add([-xs[i], -s[i - 1][k - 1]])
 
 
+def at_least_k(cnf: Cnf, xs: list[int], k: int) -> None:
+    """``sum(xs) >= k``, by counting the complements."""
+    if k <= 0:
+        return
+    at_most_k(cnf, [-x for x in xs], len(xs) - k)
+
+
 class Net:
     """Fixed shape, wiring chosen by the solver.
 
@@ -761,6 +768,308 @@ def subset_sweep(sizes: list[int], gate: str, slack: int, solver: str,
     return 0
 
 
+def generate(solver: str, sizes: list[int], timeout: float, gate: str,
+             min_ink: float, max_ink: float, anchor: int, n_letters: int,
+             min_distance: int, export: Path | None) -> int:
+    """Search for a *generator*, not a fit: every code must be letter-like.
+
+    The circuit is the decoder half only (key -> image) and there are no
+    targets. Instead each of the 2**key codes is pinned to its own code and the
+    outputs are constrained by a hand-written style predicate:
+
+      * ink density between ``min_ink`` and ``max_ink``;
+      * every row and every column has at least one ink pixel (the shape fills
+        its box, as every glyph in GLYPHS does);
+      * no isolated ink pixel: each ink pixel has a 4-neighbour that is ink, so
+        strokes cannot dissolve into dither;
+      * every horizontal ink run is one of the lengths the alphabet itself uses
+        (2, 3, 4, 5 or 8 -- calibrated from GLYPHS, not hard-coded): no 1-pixel
+        nubs, and no 6- or 7-pixel bar that is neither a stroke nor a full-width
+        rule. This is what stops the solver satisfying the other clauses with
+        wide blobs, and it is the clause that makes the output look drawn;
+      * the image differs from every one of the eight glyphs in at least
+        ``--distance`` bits, and the codes are pairwise distinct;
+      * with ``--anchor T``, each image is within T of *some* glyph, which is
+        what keeps the output letter-shaped rather than merely letter-sized.
+
+    With ``n_letters`` the first codes are pinned to real glyphs, so the
+    circuit is fitted to the alphabet exactly and the remaining codes are held
+    to the same predicate. That is what makes the free codes letter-*like*: on
+    its own the predicate is satisfied by dense texture (measured at 3, 4 and 5
+    bits, 22-31 bits from any glyph), because it describes drawn strokes, not a
+    letter. The predicate is validated against the eight real glyphs before it
+    is trusted, so "letter-like" is a rule that accepts every letter in the
+    dataset.
+
+    ``--distance`` is the floor that makes the question interesting. With the
+    default 1 the cheapest way to satisfy "not a glyph" is to flip one pixel,
+    so every free code comes back as a typo of a pinned letter. Raising it asks
+    for the band between typo and noise, which is where a *new* letter would
+    have to live -- if that band is empty, the negative is a measurement.
+
+    This is a GAN with a rule instead of a discriminator: nothing is learned,
+    so "looks like a letter" is exactly as good as the predicate above.
+    """
+    n_codes = 1 << sizes[0]
+    side = int(round(sizes[-1] ** 0.5))
+    if side * side != sizes[-1]:
+        print(f"generator output must be square, got {sizes[-1]}")
+        return 1
+    n_out = sizes[-1]
+    cnf = Cnf()
+    net = Net(sizes, gate)
+    net.build(cnf, [[0] * sizes[0] for _ in range(n_codes)],
+              [[0] * n_out for _ in range(n_codes)], 0,
+              constrain_outputs=False, free_inputs=True)
+
+    # Pin each pattern's key to its own code: the generator must work for all.
+    for p in range(n_codes):
+        for b in range(sizes[0]):
+            var = net.value_vars[0][b][p]
+            cnf.add([var if (p >> b) & 1 else -var])
+
+    names = list(GLYPHS)
+    n_letters = min(n_letters, n_codes, len(names))
+    letter_of = {p: names[p] for p in range(n_letters)}
+
+    outs = net.value_vars[-1]
+    lo = int(round(min_ink * n_out))
+    hi = int(round(max_ink * n_out))
+    neighbours = []
+    for r in range(side):
+        for c in range(side):
+            neighbours.append([r * side + c2 for c2 in (c - 1, c + 1) if 0 <= c2 < side]
+                              + [(r2) * side + c for r2 in (r - 1, r + 1) if 0 <= r2 < side])
+    glyph_bits = {name: glyphs([name], n_out)[0] for name in GLYPHS}
+
+    # The alphabet's own horizontal run lengths: letters are strokes two pixels
+    # wide, or full-width bars. Anything else is not a shape the alphabet uses,
+    # so the generator is not allowed to use it either. Calibrating here rather
+    # than hard-coding keeps the rule honest: if a glyph gains a 1-wide nub the
+    # rule follows it instead of rejecting a real letter.
+    allowed_runs: set[int] = set()
+    for bits in glyph_bits.values():
+        for r in range(side):
+            row = "".join("#" if bits[r * side + c] else "." for c in range(side))
+            allowed_runs.update(len(seg) for seg in row.split(".") if seg)
+    forbidden_runs = [L for L in range(1, side + 1) if L not in allowed_runs]
+    print(f"calibrated run lengths {sorted(allowed_runs)}, forbidding "
+          f"{forbidden_runs}")
+
+    for p in range(n_codes):
+        x = [outs[i][p] for i in range(n_out)]
+        at_least_k(cnf, x, lo)
+        at_most_k(cnf, x, hi)
+        for r in range(side):
+            cnf.add(x[r * side:(r + 1) * side])
+            cnf.add([x[r * side + c] for c in range(side)])
+        for i in range(n_out):
+            # neighbours are pixel indices, so map them through x: using the
+            # index itself would emit literal 0 for pixel 0 and split the
+            # clause (found by the predicate check below).
+            cnf.add([-x[i]] + [x[j] for j in neighbours[i]])
+        for r in range(side):
+            for length in forbidden_runs:
+                for start in range(side - length + 1):
+                    # forbid an *exact* run of this length: L ink pixels with a
+                    # non-ink (or the edge) on each side.
+                    clause = [-x[r * side + start + t] for t in range(length)]
+                    if start > 0:
+                        clause.append(x[r * side + start - 1])
+                    if start + length < side:
+                        clause.append(x[r * side + start + length])
+                    cnf.add(clause)
+        if p >= n_letters:
+            # not simply a member of the alphabet: at least ``min_distance``
+            # bits differ from each glyph, so a one-pixel typo is not enough.
+            for name, bits in glyph_bits.items():
+                diffs = [-x[i] if bits[i] else x[i] for i in range(n_out)]
+                at_least_k(cnf, diffs, max(1, min_distance))
+        else:
+            # a pinned letter: fit it exactly
+            bits = glyph_bits[letter_of[p]]
+            for i in range(n_out):
+                cnf.add([x[i] if bits[i] else -x[i]])
+        if anchor > 0:
+            # at least one glyph is within ``anchor`` bits of this image
+            sels = []
+            for name, bits in glyph_bits.items():
+                sel = cnf.var()
+                sels.append(sel)
+                guarded = []
+                for i in range(n_out):
+                    d = cnf.var()          # d <-> (differs and sel)
+                    diff = -x[i] if bits[i] else x[i]
+                    cnf.add([-d, diff])
+                    cnf.add([-d, sel])
+                    cnf.add([d, -diff, -sel])
+                    guarded.append(d)
+                at_most_k(cnf, guarded, anchor)
+            cnf.add(sels)
+
+    for a, b in itertools.combinations(range(n_codes), 2):
+        diffs = []
+        for i in range(n_out):
+            d = cnf.var()
+            diffs.append(d)
+            xa, xb = outs[i][a], outs[i][b]
+            cnf.add([-xa, -xb, -d])
+            cnf.add([xa, xb, -d])
+            cnf.add([xa, -xb, d])
+            cnf.add([-xa, xb, d])
+        cnf.add(diffs)
+
+    workdir = Path(tempfile.mkdtemp(prefix="sat_ae_"))
+    status, elapsed, model = run(solver, cnf, timeout, workdir)
+    shape = "-".join(map(str, sizes))
+    print(f"generator {shape}, {n_codes} codes, gate {gate}, letters {n_letters}, "
+          f"distance >= {max(1, min_distance)}, anchor {anchor}, "
+          f"ink {min_ink:.2f}-{max_ink:.2f}")
+    print(f"cnf: {cnf.n} vars, {len(cnf.clauses)} clauses")
+    print(f"result: {status} in {elapsed:.1f}s")
+    if status != "sat" or model is None:
+        return 0
+
+    images, keys = [], []
+    for p in range(n_codes):
+        code = [(p >> b) & 1 for b in range(sizes[0])]
+        img = simulate(net, model, code)
+        images.append(img)
+        keys.append("".join(str(b) for b in code))
+    # Verify the predicate against the simulated images, not the encoding: the
+    # first version of this mode indexed pixels by their own index instead of
+    # their output variable, which produced literal 0 in the CNF and a witness
+    # that satisfied nothing. Any such bug has to fail loudly here.
+    problems = []
+    for p, img in enumerate(images):
+        ink = sum(img)
+        if not lo <= ink <= hi:
+            problems.append(f"code {p}: ink {ink} outside {lo}-{hi}")
+        for r in range(side):
+            if not any(img[r * side:(r + 1) * side]):
+                problems.append(f"code {p}: row {r} is empty")
+            if not any(img[r * side + c] for c in range(side)):
+                problems.append(f"code {p}: column {r} is empty")
+        for i in range(n_out):
+            if img[i] and not any(img[j] for j in neighbours[i]):
+                problems.append(f"code {p}: pixel {i} is isolated")
+        for r in range(side):
+            row = "".join("#" if img[r * side + c] else "." for c in range(side))
+            for seg in row.split("."):
+                if seg and len(seg) not in allowed_runs:
+                    problems.append(
+                        f"code {p}: row {r} has a {len(seg)}-pixel run")
+        if p < n_letters:
+            if img != glyph_bits[letter_of[p]]:
+                problems.append(f"code {p}: does not round-trip as {letter_of[p]}")
+        else:
+            for name, bits in glyph_bits.items():
+                d = sum(a != b for a, b in zip(img, bits))
+                if d < max(1, min_distance):
+                    problems.append(f"code {p}: only {d} bits from glyph {name}")
+        if anchor > 0:
+            near = min(sum(a != b for a, b in zip(img, glyph_bits[g]))
+                       for g in glyph_bits)
+            if near > anchor:
+                problems.append(f"code {p}: nearest glyph is {near} bits away")
+    if len({tuple(img) for img in images}) != len(images):
+        problems.append("codes are not pairwise distinct")
+    for name, bits in glyph_bits.items():
+        if not lo <= sum(bits) <= hi:
+            problems.append(f"PREDICATE REJECTS glyph {name} ({sum(bits)} ink)")
+        for r in range(side):
+            if not any(bits[r * side:(r + 1) * side]) or \
+                    not any(bits[r * side + c] for c in range(side)):
+                problems.append(f"PREDICATE REJECTS glyph {name} (row/col {r})")
+        for i in range(n_out):
+            if bits[i] and not any(bits[j] for j in neighbours[i]):
+                problems.append(f"PREDICATE REJECTS glyph {name} (isolated {i})")
+    for problem in problems[:8]:
+        print(f"  PREDICATE VIOLATED: {problem}")
+    if problems:
+        return 1
+
+    inks = [sum(img) / n_out for img in images]
+    dists = [min(sum(a != b for a, b in zip(img, glyph_bits[g]))
+                 for g in glyph_bits) for img in images]
+    print(f"ink {min(inks):.3f}-{max(inks):.3f}, "
+          f"distinct {len({tuple(i) for i in images})}/{n_codes}, "
+          f"distance to nearest glyph {min(dists)}-{max(dists)} bits")
+    for code, img in sorted(zip(keys, images), key=lambda kv: int(kv[0][::-1], 2)):
+        p = int(code[::-1], 2)
+        label = f"  {code}" + (f"  = {letter_of[p]}" if p in letter_of else "  = new")
+        print(label)
+        for r in range(side):
+            print("    " + "".join("#" if img[r * side + c] else "."
+                                   for c in range(side)))
+
+    if export is not None:
+        wiring = []
+        for g in net.gates:
+            choice = (read_index(model, g["a_bits"]), read_index(model, g["b_bits"]))
+            if net.op in ("xor3", "mix"):
+                choice += (1 if model.get(g["bias"], False) else 0,)
+            if net.op == "nandinv":
+                choice += (1 if model.get(g["inv"], False) else 0,)
+            if net.op == "mix":
+                choice += (1 if model.get(g["kind"], False) else 0,)
+            wiring.append(choice)
+        decoder = circuit_json(net, wiring, 0, len(sizes) - 1)
+        # Re-run the exported circuit, not the SAT model, before saving.
+        for p in range(n_codes):
+            code = [(p >> b) & 1 for b in range(sizes[0])]
+            got = eval_circuit(decoder, code)
+            if got != images[p]:
+                print(f"EXPORT BROKEN: code {p} differs after serialisation")
+                return 1
+        export.mkdir(parents=True, exist_ok=True)
+        (export / "circuit.json").write_text(json.dumps(decoder, separators=(",", ":")))
+        meta = {
+            "kind": "glyph generator",
+            "gate": gate,
+            "shape": shape,
+            "key_bits": sizes[0],
+            "gates": len(decoder["gates"]),
+            "side": side,
+            "solver": solver.rsplit("/", 1)[-1],
+            "seconds": round(elapsed, 2),
+            "anchor": anchor,
+            "min_distance": max(1, min_distance),
+            "min_ink": min_ink,
+            "max_ink": max_ink,
+            "codes": [{"code": k, "bits": img,
+                       "name": letter_of.get(int(k[::-1], 2)),
+                       "trained": int(k[::-1], 2) in letter_of,
+                       "ink": round(sum(img) / n_out, 3),
+                       "nearest_glyph": min(glyph_bits,
+                                            key=lambda g: sum(a != b for a, b in
+                                                              zip(img, glyph_bits[g]))),
+                       "distance": min(sum(a != b for a, b in zip(img, glyph_bits[g]))
+                                       for g in glyph_bits)}
+                      for k, img in sorted(zip(keys, images))],
+            "run_lengths": sorted(allowed_runs),
+            "predicate": (
+                "ink density in range, every row and column inked, no isolated "
+                "ink pixel, every horizontal ink run one of the lengths the "
+                f"alphabet uses, at least {max(1, min_distance)} bits from every "
+                "glyph, all codes distinct, "
+                + (f"and within {anchor} bits of some glyph" if anchor else
+                   "no anchor to the alphabet")
+            ),
+            "note": (
+                "No adversary and no gradients: the generator is a circuit whose "
+                "wiring the solver chose, and the 'discriminator' is the predicate "
+                "above. These are images that satisfy a rule written by hand, not "
+                "a learned idea of what a letter is -- which is why the four "
+                "pinned letters matter. With none pinned the same rule is "
+                "satisfied by texture."
+            ),
+        }
+        (export / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+        print(f"exported {len(decoder['gates'])} gates to {export}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -774,7 +1083,7 @@ def main() -> int:
     parser.add_argument("--slack", type=int, default=0,
                         help="maximum wrong output bits per pattern")
     parser.add_argument("--mode", choices=["full", "encoder", "decoder", "selftest", "brute",
-                                          "functions", "subsets"],
+                                          "functions", "subsets", "generate"],
                         default="full")
     parser.add_argument("--gate", choices=["nand", "nandinv", "xor3", "xor2", "mix"], default="nand",
                         help="nand = NAND(a,b); xor3 = XOR(a,b) plus a SAT-chosen "
@@ -786,6 +1095,21 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--subset-size", type=int, default=4,
                         help="glyphs per subset for --mode subsets (default 4)")
+    parser.add_argument("--min-ink", type=float, default=0.33,
+                        help="minimum ink fraction for --mode generate (default "
+                             "0.33; the glyphs span 0.375-0.562)")
+    parser.add_argument("--max-ink", type=float, default=0.61,
+                        help="maximum ink fraction for --mode generate (default 0.61)")
+    parser.add_argument("--letters", type=int, default=0,
+                        help="--mode generate: pin the first N codes to real glyphs "
+                             "(exact fit) and hold the rest to the predicate")
+    parser.add_argument("--distance", type=int, default=1,
+                        help="--mode generate: free codes must differ from every "
+                             "glyph in at least this many bits (default 1, which "
+                             "permits a one-pixel typo)")
+    parser.add_argument("--anchor", type=int, default=0,
+                        help="--mode generate: each image must be within this "
+                             "many bits of some glyph (0 = no anchor)")
     parser.add_argument("--keep", help="copy the CNF here for inspection")
     parser.add_argument("--export", metavar="DIR",
                         help="write the witness as browser circuits + meta.json")
@@ -812,6 +1136,10 @@ def main() -> int:
     if args.mode == "subsets":
         return subset_sweep(sizes, args.gate, args.slack, args.solver,
                             args.timeout, args.subset_size)
+    if args.mode == "generate":
+        return generate(args.solver, sizes, args.timeout, args.gate,
+                        args.min_ink, args.max_ink, args.anchor, args.letters,
+                        args.distance, Path(args.export) if args.export else None)
 
     names = list(args.glyphs) if args.glyphs else list(GLYPHS)[: args.patterns]
     unknown = [n for n in names if n not in GLYPHS]

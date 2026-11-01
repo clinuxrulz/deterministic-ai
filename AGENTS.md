@@ -50,6 +50,21 @@ output — `effective_latent` in `web/public/gan/meta.json`, measured by flippin
 each bit offline. The tab is titled "This cat is not real."; `?tab=gan&selftest=1`
 renders a deterministic grid for headless checks.
 
+The **glyph gan** tab is a *generator* rather than an autoencoder: `--mode
+generate` in `scripts/sat_ae.py` asks Kissat for a circuit that turns a 5-bit
+latent into an 8x8 image satisfying a predicate (ink range, every row and column
+inked, no isolated pixel, every horizontal ink run a length the alphabet uses,
+at least 4 bits from every real glyph). Four of the 32 codes are pinned to A-D;
+the other 28 are the point. `web/public/gan8/` holds the 112-gate circuit and
+its metadata, and every tile is drawn by running the circuit, not by reading the
+JSON, so `?tab=glyphs&selftest=1` prints `self-test · 32/32 codes reproduce ·
+4/4 letters exact · 112 gates`. The tab is titled "A typeface nothing asked
+for." and says plainly why the variants share a body with the pinned letter: the
+cone analysis (k2 reaches 5 of 64 pixels, k4 9, k3 14) means three latent bits
+only repaint the top. Regenerate with
+`python3 scripts/sat_ae.py --mode generate --shape 5,16,32,64 --gate nandinv
+--letters 4 --distance 4 --export web/public/gan8`.
+
 The **solver's wiring** tab is the 8x8/3-bit witness from
 `scripts/sat_ae.py` (Checkpoint 12), written by `--export web/public/sat`: eight
 glyphs with the code the encoder gives each, all eight key codes decoded side by
@@ -300,7 +315,7 @@ cargo run --release -p xorae -- export \
 | `crates/cli/src/ga.rs` | Genetic algorithm, fitness, evaluation |
 | `crates/cli/src/dataset.rs` | CIFAR loader, planar fix, `XAE4` format, palette/colour modes |
 | `crates/wasm/src/lib.rs` | `wasm-bindgen` bridge |
-| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions`/`subsets` modes, `--gate {nand,nandinv,xor3,xor2,mix}`, `--glyphs`/`--slack`/`--export` |
+| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions`/`subsets`/`generate` modes, `--gate {nand,nandinv,xor3,xor2,mix}`, `--glyphs`/`--slack`/`--letters`/`--distance`/`--anchor`/`--export` |
 | `scripts/circuit_cones.py` | exact dependency cones of every wire: what an output *can* depend on |
 | `scripts/make_glyph_dataset.py` | writes the 8×8 glyphs as `XAE4` so `train-nand` can train on the same data |
 | `web/src/App.tsx` | Solid 2.0 UI |
@@ -394,6 +409,23 @@ plus `meta.json`, and the exporter re-simulates them on every glyph before
 saving, so a broken export fails loudly instead of shipping. That is what the
 demo's *solver's-wiring* tab runs; regenerate it with
 `python3 scripts/sat_ae.py --patterns 3 --export web/public/sat`.
+
+**`--mode generate` asks the opposite question: build, don't fit.** Targets are
+dropped, each of the `2**k` codes is pinned to its own key, and the outputs must
+satisfy a hand-written predicate (ink range, every row and column inked, no
+isolated pixel, every horizontal run a length the alphabet uses — 2/3/4/5/8,
+calibrated from `GLYPHS` — and at least `--distance` bits from every glyph).
+The predicate is not a discriminator and the result is not a GAN: with nothing
+pinned the solver satisfies every clause with **texture** (22-31 bits from any
+glyph, measured at 3, 4 and 5 bits), because the rule describes drawn strokes,
+not a letter. `--letters 4` pins A-D exactly and the remaining 28 codes come
+back as letter-like variants in four families; 5 pinned letters is UNSAT at both
+4 and 5 bits. `--distance` matters: at the default 1 the cheapest way to be "not
+a glyph" is to flip one pixel, so every code is a typo, and at 4 they are
+distinct (26 of 28 at least 5 bits from every letter, as far as C is from G).
+The exported 5-bit witness is 112 gates / 554T and its cone analysis explains
+the result: k2 reaches 5 of 64 output pixels, k4 9, k3 14, so three latent bits
+only repaint the glyph's top and every variant shares the pinned letter's body.
 
 `scripts/circuit_cones.py` computes what each output of an exported circuit can
 possibly depend on (union the two inputs' dependency sets at every gate). The
@@ -495,6 +527,10 @@ Do not spend time re-running these.
    well as real keys (0.806 vs 0.801) while decoding to recognisable digits.
    Next steps if this is the direction: a nonlinear/RNN prior should cut the
    NLL further, and a GAN on keys is now defensible rather than speculative.
+   The Glyph GAN (`--mode generate`, demo tab *glyph gan*) is the same idea on
+   the 8x8 alphabet, and it bounds what to expect: with a hand-written predicate
+   the free codes are letter-like variants whose variation is limited by the
+   wiring's fan-in, not new letter identities.
 3. **Capacity per gate is the binding constraint.** Three independent
    measurements: the model cannot fit 100 images (train BER 0.1741 ≈ the 4,000
    image result); train/val/test BER are all equal; and the wiring is spread so

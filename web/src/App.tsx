@@ -83,13 +83,15 @@ function runImage(image: HTMLImageElement, model: ModelHandle): InferenceResult 
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
-  const [tab, setTab] = createSignal<"reconstruct" | "digits" | "gan" | "sat">(
+  const [tab, setTab] = createSignal<"reconstruct" | "digits" | "gan" | "glyphs" | "sat">(
     params.get("tab") === "digits"
       ? "digits"
       : params.get("tab") === "gan"
         ? "gan"
-        : params.get("tab") === "sat"
-          ? "sat"
+        : params.get("tab") === "glyphs"
+          ? "glyphs"
+          : params.get("tab") === "sat"
+            ? "sat"
           : "reconstruct",
   );
   const [models, setModels] = createSignal<ModelEntry[]>([]);
@@ -363,6 +365,12 @@ export default function App() {
           cat gan
         </button>
         <button
+          class={tab() === "glyphs" ? "tab active" : "tab"}
+          onClick={() => setTab("glyphs")}
+        >
+          glyph gan
+        </button>
+        <button
           class={tab() === "sat" ? "tab active" : "tab"}
           onClick={() => setTab("sat")}
         >
@@ -373,7 +381,21 @@ export default function App() {
       <Show
         when={tab() === "reconstruct"}
         fallback={
-          <Show when={tab() === "digits"} fallback={<Show when={tab() === "gan"} fallback={<SatLab />}><CatGan /></Show>}>
+          <Show
+          when={tab() === "digits"}
+          fallback={
+            <Show
+              when={tab() === "gan"}
+              fallback={
+                <Show when={tab() === "glyphs"} fallback={<SatLab />}>
+                  <GlyphGan />
+                </Show>
+              }
+            >
+              <CatGan />
+            </Show>
+          }
+        >
             <DigitLab />
           </Show>
         }
@@ -1291,6 +1313,272 @@ function CatGan() {
           latent <code class="ganhex">{latentHex()}</code>
         </p>
         <p class="hint">{info()?.note}</p>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Glyph GAN tab: a *generator*, not an autoencoder.
+//
+// `scripts/sat_ae.py --mode generate --gate nandinv --letters 4 --distance 4`
+// asks Kissat for a circuit that turns a 5-bit latent into an 8x8 image, where
+// "an image" is a hand-written predicate: ink in the alphabet's range, every
+// row and column inked, no isolated pixel, every horizontal ink run one of the
+// lengths the alphabet itself uses (2, 3, 4, 5 or 8, calibrated from GLYPHS),
+// and at least 4 bits from every real glyph.
+//
+// Four of the 32 codes are pinned to real letters, so the circuit is fitted to
+// the alphabet; the other 28 are held to the same rule and come back as glyphs
+// that read as letters but are in none of them. That is the whole trick: with
+// nothing pinned the solver satisfies the predicate with texture, which was
+// checked at 3, 4 and 5 bits. The predicate says "drawn strokes", not "a
+// letter", so the alphabet has to be in the circuit for the rest to follow.
+//
+// It is a GAN only in the loosest sense: the discriminator is that predicate,
+// so there is no adversary and nothing is learned.
+// ---------------------------------------------------------------------------
+
+type GlyphGanCode = {
+  code: string;
+  bits: number[];
+  name: string | null;
+  trained: boolean;
+  ink: number;
+  nearest_glyph: string;
+  distance: number;
+};
+
+type GlyphGanMeta = {
+  kind: string;
+  gate: string;
+  shape: string;
+  key_bits: number;
+  gates: number;
+  side: number;
+  solver: string;
+  seconds: number;
+  anchor: number;
+  min_distance: number;
+  min_ink: number;
+  max_ink: number;
+  run_lengths: number[];
+  codes: GlyphGanCode[];
+  predicate: string;
+  note: string;
+};
+
+function GlyphGan() {
+  const params = new URLSearchParams(window.location.search);
+  let circuitJson = "";
+  let detailRef: HTMLCanvasElement | undefined;
+
+  const [meta, setMeta] = createSignal<GlyphGanMeta | null>(null);
+  const [status, setStatus] = createSignal("loading the generator circuit…");
+  const [images, setImages] = createSignal<number[][]>([]);
+  const [selected, setSelected] = createSignal<number | null>(null);
+
+  /** Decode one code through the shipped circuit, not through the JSON. */
+  const decode = (code: string): number[] =>
+    Array.from(
+      run_circuit(circuitJson, Uint8Array.from([...code].map((c) => (c === "1" ? 1 : 0)))),
+    );
+
+  const pick = (index: number, list: number[][], info: GlyphGanMeta | null) => {
+    const entry = info?.codes[index];
+    const bits = list[index];
+    if (!entry || !bits) return;
+    setSelected(index);
+    drawGlyph(detailRef, bits, info?.side ?? 8);
+    setStatus(
+      (entry.trained ? `trained letter ${entry.name}` : "new") +
+        ` · key ${entry.code} · ${(entry.ink * 100).toFixed(0)}% ink · ` +
+        `${entry.distance} bits from ${entry.nearest_glyph}`,
+    );
+  };
+
+  onSettled(() => {
+    void (async () => {
+      try {
+        const [metaJson, circuit] = await Promise.all([
+          fetchJson<GlyphGanMeta>(asset("gan8/meta.json")),
+          fetchJson<{ n_inputs: number; gates: unknown[]; outputs: number[] }>(
+            asset("gan8/circuit.json"),
+          ),
+        ]);
+        await wasmReady;
+        circuitJson = JSON.stringify(circuit);
+        setMeta(metaJson);
+
+        // Every code goes through the circuit; the grid shows the circuit's
+        // output, and the self-test compares it against the recorded one.
+        const decoded = metaJson.codes.map((entry) => decode(entry.code));
+        setImages(decoded);
+
+        if (params.get("selftest") === "1") {
+          let match = 0;
+          for (let i = 0; i < decoded.length; i += 1) {
+            const want = metaJson.codes[i].bits;
+            const got = decoded[i];
+            if (want.length === got.length && want.every((bit, k) => bit === got[k])) match += 1;
+          }
+          const letters = metaJson.codes.filter((entry) => entry.trained);
+          let exact = 0;
+          for (let i = 0; i < metaJson.codes.length; i += 1) {
+            const entry = metaJson.codes[i];
+            if (!entry.trained) continue;
+            if (entry.bits.every((bit, k) => bit === decoded[i][k])) exact += 1;
+          }
+          pick(0, decoded, metaJson);
+          setStatus(
+            `self-test · ${match}/${decoded.length} codes reproduce · ` +
+              `${exact}/${letters.length} letters exact · ${metaJson.gates} gates`,
+          );
+          return;
+        }
+        pick(0, decoded, metaJson);
+      } catch (error) {
+        setStatus(`could not load the generator circuit: ${String(error)}`);
+      }
+    })();
+  });
+
+  const chosen = createMemo(() => {
+    const index = selected();
+    return index === null ? null : (meta()?.codes[index] ?? null);
+  });
+
+  /** The 32 codes are four families of eight: every code's nearest letter. */
+  const families = createMemo(() => {
+    const info = meta();
+    if (!info) return [] as { letter: string; tiles: { entry: GlyphGanCode; index: number }[] }[];
+    const groups = new Map<string, { entry: GlyphGanCode; index: number }[]>();
+    info.codes.forEach((entry, index) => {
+      const list = groups.get(entry.nearest_glyph) ?? [];
+      list.push({ entry, index });
+      groups.set(entry.nearest_glyph, list);
+    });
+    return [...groups.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([letter, tiles]) => ({
+        letter,
+        tiles: tiles.sort((a, b) => a.entry.distance - b.entry.distance),
+      }));
+  });
+
+  return (
+    <section class="ganlab">
+      <div class="gan-head">
+        <h2>A typeface nothing asked for.</h2>
+        <p class="hint">
+          The solver was given a 5-bit latent and a rule for what a letter looks like, and it chose
+          the wiring of {meta()?.gates ?? 112} gates that satisfies it. Four codes are pinned to A, B,
+          C and D; the other {meta() ? meta()!.codes.length - 4 : 28} satisfy the same rule and are
+          not in the alphabet. Every tile below is drawn by running the circuit.
+        </p>
+      </div>
+
+      <div class="gan-panel">
+        <For each={families()}>
+          {(family) => (
+            <div class="glyphfamily">
+              <span class="glyphfamily-label">{family.letter}</span>
+              <div class="glyphgrid">
+                <For each={family.tiles}>
+                  {(tile) => (
+                    <button
+                      class={
+                        (selected() === tile.index ? "glyphtile on" : "glyphtile") +
+                        (tile.entry.trained ? " trained" : "")
+                      }
+                      onClick={() => {
+                        const info = meta();
+                        if (info) pick(tile.index, images(), info);
+                      }}
+                      title={
+                        tile.entry.trained
+                          ? `the real ${tile.entry.name}`
+                          : `new · ${tile.entry.code} · ${tile.entry.distance} bits from ${family.letter}`
+                      }
+                    >
+                      <canvas
+                        class="glyphcanvas"
+                        ref={(el) =>
+                          drawGlyph(
+                            el,
+                            images()[tile.index] ?? tile.entry.bits,
+                            meta()?.side ?? 8,
+                          )
+                        }
+                      />
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+          )}
+        </For>
+        <p class="hint">
+          One row per letter: the first tile is the real letter, the other seven satisfy the same
+          rule and are in no alphabet.
+        </p>
+        <p class="status">{status()}</p>
+      </div>
+
+      <div class="gan-side">
+        <canvas ref={detailRef} class="glyph-detail" width={8} height={8} />
+        <p class="hint">
+          <Show
+            when={chosen()?.trained}
+            fallback={
+              <>
+                not one of the eight letters: {chosen()?.distance ?? 0} bits from{" "}
+                {chosen()?.nearest_glyph ?? "–"}, which is the same order as the alphabet's own
+                spacing (C and G are 5 apart, E and F 6).
+              </>
+            }
+          >
+            pinned to the real {chosen()?.name}, so the rest of the latent is held to the shape it
+            learned here.
+          </Show>
+        </p>
+
+        <div class="ganstats">
+          <div>
+            <span>gates</span>
+            <strong>{meta() ? meta()!.gates : "–"}</strong>
+          </div>
+          <div>
+            <span>latent</span>
+            <strong>{meta() ? `${meta()!.key_bits} bits` : "–"}</strong>
+          </div>
+          <div>
+            <span>codes</span>
+            <strong>{meta() ? meta()!.codes.length : "–"}</strong>
+          </div>
+          <div>
+            <span>gate</span>
+            <strong>{meta()?.gate ?? "nandinv"}</strong>
+          </div>
+          <div>
+            <span>min distance</span>
+            <strong>{meta() ? `${meta()!.min_distance} bits` : "–"}</strong>
+          </div>
+          <div>
+            <span>shape</span>
+            <strong>{meta()?.shape ?? "–"}</strong>
+          </div>
+        </div>
+
+        <p class="hint">
+          Why they read as one typeface rather than new letters: the wiring only lets an output pixel
+          see {meta()?.key_bits ?? 5} key bits at most, and in this witness k2 reaches{" "}
+          <strong>5 of 64</strong> pixels (row 0), k3 14 (rows 1–2) and k4 9 (rows 0–1) — so those
+          three bits repaint the top of the glyph and k0/k1 carry the letter. Measured with{" "}
+          <code>scripts/circuit_cones.py</code>.
+        </p>
+        <p class="hint">{meta()?.predicate}</p>
+        <p class="hint">{meta()?.note}</p>
       </div>
     </section>
   );
