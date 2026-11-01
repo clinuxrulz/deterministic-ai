@@ -83,12 +83,14 @@ function runImage(image: HTMLImageElement, model: ModelHandle): InferenceResult 
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
-  const [tab, setTab] = createSignal<"reconstruct" | "digits" | "gan">(
+  const [tab, setTab] = createSignal<"reconstruct" | "digits" | "gan" | "sat">(
     params.get("tab") === "digits"
       ? "digits"
       : params.get("tab") === "gan"
         ? "gan"
-        : "reconstruct",
+        : params.get("tab") === "sat"
+          ? "sat"
+          : "reconstruct",
   );
   const [models, setModels] = createSignal<ModelEntry[]>([]);
   const [selectedId, setSelectedId] = createSignal("");
@@ -360,12 +362,18 @@ export default function App() {
         >
           cat gan
         </button>
+        <button
+          class={tab() === "sat" ? "tab active" : "tab"}
+          onClick={() => setTab("sat")}
+        >
+          solver's wiring
+        </button>
       </nav>
 
       <Show
         when={tab() === "reconstruct"}
         fallback={
-          <Show when={tab() === "digits"} fallback={<CatGan />}>
+          <Show when={tab() === "digits"} fallback={<Show when={tab() === "gan"} fallback={<SatLab />}><CatGan /></Show>}>
             <DigitLab />
           </Show>
         }
@@ -1283,6 +1291,343 @@ function CatGan() {
           latent <code class="ganhex">{latentHex()}</code>
         </p>
         <p class="hint">{info()?.note}</p>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SAT tab: the wiring was chosen by a solver, not by gradient descent.
+//
+// `scripts/sat_ae.py --patterns 3 --export web/public/sat` encodes the
+// trainer's template (64 -> 32 -> 16 -> 3 -> 16 -> 32 -> 64) as CNF, lets
+// Kissat pick both input wires of every gate, and writes the witness as two
+// plain `Circuit` JSON objects. The encoder maps 8x8 glyphs to a 3-bit key;
+// the decoder maps a key back to a glyph.
+//
+// The tab is about the *key space*. Three codes are trained, one more is
+// reached by the held-out glyphs, and the remaining four are codes the solver
+// never had to satisfy, so flipping a bit walks you into a circuit nobody
+// asked for. That is the checkpoint's result made clickable: 8 codes, 3
+// glyphs, and a decoder that can only draw 16 of the 256 functions of a key.
+// ---------------------------------------------------------------------------
+
+type SatGlyph = {
+  name: string;
+  bits: number[];
+  code: string;
+  trained: boolean;
+  wrong_bits: number;
+};
+
+type SatMeta = {
+  side: number;
+  key_bits: number;
+  shape: string;
+  gates: number;
+  solver: string;
+  seconds: number;
+  trained: string[];
+  trained_codes: string[];
+  used_codes: string[];
+  glyphs: SatGlyph[];
+  infeasible: string;
+  note: string;
+};
+
+type CircuitJson = {
+  n_inputs: number;
+  gates: { op: string; a: number; b: number }[];
+  outputs: number[];
+};
+
+type SatCircuits = { encoder: CircuitJson; decoder: CircuitJson };
+
+/** Code string with bit 0 first, which is the order the solver reports. */
+function codeBits(value: number, width: number): string {
+  let out = "";
+  for (let i = 0; i < width; i += 1) out += (value >> i) & 1 ? "1" : "0";
+  return out;
+}
+
+function drawGlyph(canvas: HTMLCanvasElement | undefined, bits: number[], side: number): void {
+  if (!canvas) return;
+  canvas.width = side;
+  canvas.height = side;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  const image = context.createImageData(side, side);
+  for (let i = 0; i < bits.length && i < side * side; i += 1) {
+    const value = bits[i] === 1 ? GAN_ON : GAN_OFF;
+    const p = i * 4;
+    image.data[p] = value;
+    image.data[p + 1] = value;
+    image.data[p + 2] = value;
+    image.data[p + 3] = 255;
+  }
+  context.putImageData(image, 0, 0);
+}
+
+function SatLab() {
+  const params = new URLSearchParams(window.location.search);
+  let encoderJson = "";
+  let decoderJson = "";
+  let loaded: SatMeta | null = null;
+  let glyphSide = 8;
+  let reconRef: HTMLCanvasElement | undefined;
+
+  const [meta, setMeta] = createSignal<SatMeta | null>(null);
+  const [status, setStatus] = createSignal("loading the solver's circuit…");
+  const [code, setCode] = createSignal("000");
+  const [selected, setSelected] = createSignal<string | null>(null);
+  const [recon, setRecon] = createSignal<number[]>([]);
+  const [space, setSpace] = createSignal<{ code: string; out: number[] }[]>([]);
+
+  const ownersOf = (bits: string, glyphs: SatGlyph[], trained: string[]): string[] =>
+    glyphs.filter((glyph) => glyph.code === bits).map((glyph) => glyph.name);
+
+  const describe = (bits: string): string => {
+    const owners = ownersOf(bits, loaded?.glyphs ?? [], loaded?.trained ?? []);
+    const trained = owners.filter((name) => (loaded?.trained ?? []).includes(name));
+    if (trained.length > 0) return `key ${bits} · trained · this is ${trained.join(", ")}`;
+    if (owners.length > 0) {
+      return `key ${bits} · never trained, but ${owners.join(" and ")} encode here`;
+    }
+    return `key ${bits} · no glyph lands here — the decoder improvises`;
+  };
+
+  /** Redraw from an explicit value: signal reads here would be stale. */
+  const show = (next: string, label?: string) => {
+    if (decoderJson === "") return;
+    const out = Array.from(
+      run_circuit(decoderJson, Uint8Array.from([...next].map((c) => (c === "1" ? 1 : 0)))),
+    );
+    setCode(next);
+    setRecon(out);
+    drawGlyph(reconRef, out, glyphSide);
+    setStatus(label ? `${label} · ${describe(next)}` : describe(next));
+  };
+
+  const encodeGlyph = (glyph: SatGlyph) => {
+    if (encoderJson === "") return;
+    const key = Array.from(run_circuit(encoderJson, Uint8Array.from(glyph.bits)));
+    const bits = key.map((bit) => (bit ? "1" : "0")).join("");
+    setSelected(glyph.name);
+    show(bits, `encode ${glyph.name} → key ${bits}`);
+  };
+
+  const mismatch = createMemo(() => {
+    const name = selected();
+    const out = recon();
+    const glyph = (meta()?.glyphs ?? []).find((entry) => entry.name === name);
+    if (!glyph || out.length === 0) return null;
+    let wrong = 0;
+    for (let i = 0; i < out.length; i += 1) if (out[i] !== glyph.bits[i]) wrong += 1;
+    return wrong;
+  });
+
+  /** Sorted so the chip row reads in the displayed bit order, bit 0 first. */
+  const codeList = () => {
+    const width = meta()?.key_bits ?? 3;
+    return Array.from({ length: 1 << width }, (_, i) => codeBits(i, width)).sort();
+  };
+
+  const chipLabel = (bits: string): string => {
+    const owners = ownersOf(bits, meta()?.glyphs ?? [], meta()?.trained ?? []);
+    if (owners.length === 0) return "—";
+    return owners
+      .map((name) => ((meta()?.trained ?? []).includes(name) ? name : `${name}·`))
+      .join(" ");
+  };
+
+  onSettled(() => {
+    void (async () => {
+      try {
+        const [metaJson, circuit] = await Promise.all([
+          fetchJson<SatMeta>(asset("sat/meta.json")),
+          fetchJson<SatCircuits>(asset("sat/circuit.json")),
+        ]);
+        await wasmReady;
+        encoderJson = JSON.stringify(circuit.encoder);
+        decoderJson = JSON.stringify(circuit.decoder);
+        loaded = metaJson;
+        glyphSide = metaJson.side;
+        setMeta(metaJson);
+
+        // Decode every code once: the whole key space is 8 images, so show it.
+        setSpace(
+          Array.from({ length: 1 << metaJson.key_bits }, (_, i) => {
+            const bits = codeBits(i, metaJson.key_bits);
+            return {
+              code: bits,
+              out: Array.from(
+                run_circuit(decoderJson, Uint8Array.from([...bits].map((c) => (c === "1" ? 1 : 0)))),
+              ),
+            };
+          }).sort((a, b) => a.code.localeCompare(b.code)),
+        );
+
+        const first = metaJson.trained_codes[0] ?? codeBits(0, metaJson.key_bits);
+
+        if (params.get("selftest") === "1") {
+          const trained = metaJson.glyphs.filter((glyph) => glyph.trained);
+          let exact = 0;
+          for (const glyph of trained) {
+            const key = run_circuit(encoderJson, Uint8Array.from(glyph.bits));
+            const out = run_circuit(decoderJson, key);
+            let wrong = 0;
+            for (let i = 0; i < out.length; i += 1) if (out[i] !== glyph.bits[i]) wrong += 1;
+            if (wrong === 0) exact += 1;
+          }
+          show(first);
+          setStatus(
+            `self-test · ${exact}/${trained.length} trained glyphs round-trip exactly · ` +
+              `${metaJson.gates} gates · codes ${metaJson.trained_codes.join(" ")}`,
+          );
+          return;
+        }
+        show(first);
+      } catch (error) {
+        setStatus(`could not load the solver's circuit: ${String(error)}`);
+      }
+    })();
+  });
+
+  return (
+    <section class="satlab">
+      <div class="sat-head">
+        <h2>A solver chose these wires.</h2>
+        <p class="hint">
+          No gradients and no weights: Kissat picked both input wires of each of the{" "}
+          {meta()?.gates ?? 163} NAND gates, and it proved no wiring of this shape fits
+          four of these glyphs. Click a letter to run it through the encoder, then flip a
+          key bit to decode a code that was never trained on.
+        </p>
+      </div>
+
+      <div class="sat-panel">
+        <div class="sat-glyphs">
+          <For each={meta()?.glyphs ?? []}>
+            {(glyph) => (
+              <button
+                class={selected() === glyph.name ? "sat-glyph on" : "sat-glyph"}
+                onClick={() => encodeGlyph(glyph)}
+                title={glyph.trained ? `${glyph.name}: trained` : `${glyph.name}: held out`}
+              >
+                <canvas class="sattile" ref={(el) => drawGlyph(el, glyph.bits, meta()?.side ?? 8)} />
+                <span class="sattile-label">
+                  <strong>{glyph.name}</strong>
+                  <em class={glyph.trained ? "sat-trained" : undefined}>
+                    {glyph.trained ? `${glyph.code} · trained` : glyph.code}
+                  </em>
+                </span>
+              </button>
+            )}
+          </For>
+        </div>
+        <p class="hint">
+          The code under each letter is the encoder's answer. Three glyphs were trained, one
+          per code; the five held-out ones land on those same three and on one more code
+          that nothing was trained on.
+        </p>
+        <span class="sat-keyhead">the whole key space — 8 codes, 8 images</span>
+        <div class="sat-space">
+          <For each={space()}>
+            {(entry) => (
+              <button
+                class={entry.code === code() ? "sat-cell on" : "sat-cell"}
+                onClick={() => {
+                  setSelected(null);
+                  show(entry.code);
+                }}
+                title={describe(entry.code)}
+              >
+                <canvas class="sattile" ref={(el) => drawGlyph(el, entry.out, meta()?.side ?? 8)} />
+                <em>{entry.code}</em>
+              </button>
+            )}
+          </For>
+        </div>
+        <p class="hint">
+          Every code the decoder can be handed. Five of these were never trained on, yet
+          each still produces a definite image — that is the code space doing the work, not
+          memorised pictures.
+        </p>
+      </div>
+
+      <div class="sat-side">
+        <div class="sat-key">
+          <span class="sat-keyhead">key</span>
+          <For each={Array.from({ length: meta()?.key_bits ?? 3 }, (_, i) => i)}>
+            {(bit) => (
+              <button
+                class="sat-bit"
+                onClick={() => {
+                  setSelected(null);
+                  const next = [...code()];
+                  next[bit] = next[bit] === "1" ? "0" : "1";
+                  show(next.join(""));
+                }}
+                title={`flip key bit ${bit}`}
+              >
+                {code()[bit]}
+                <em>k{bit}</em>
+              </button>
+            )}
+          </For>
+        </div>
+
+        <div class="sat-codes">
+          <For each={codeList()}>
+            {(bits) => (
+              <button
+                class={bits === code() ? "sat-chip on" : "sat-chip"}
+                onClick={() => {
+                  setSelected(null);
+                  show(bits);
+                }}
+              >
+                {bits}
+                <em>{chipLabel(bits)}</em>
+              </button>
+            )}
+          </For>
+        </div>
+
+        <p class="hint sat-chipnote">
+          A chip's label lists the glyphs that encode to that code; <code>·</code> marks a
+          glyph the solver never had to fit, and <code>—</code> a code no glyph reaches.
+        </p>
+
+        <span class="sat-keyhead">decoder output · key {code()}</span>
+        <canvas ref={reconRef} class="sat-recon" width={64} height={64} />
+        <p class="status">{status()}</p>
+        <Show when={mismatch() !== null}>
+          <p class="hint">
+            {mismatch()} of {recon().length} bits differ from {selected()} — this key was
+            not trained on it.
+          </p>
+        </Show>
+
+        <div class="ganstats">
+          <div>
+            <span>gates</span>
+            <strong>{meta() ? meta()!.gates : "–"}</strong>
+          </div>
+          <div>
+            <span>key</span>
+            <strong>{meta() ? `${meta()!.key_bits} bits` : "–"}</strong>
+          </div>
+          <div>
+            <span>shape</span>
+            <strong>{meta()?.shape ?? "–"}</strong>
+          </div>
+          <div>
+            <span>solver</span>
+            <strong>{meta()?.solver ?? "–"}</strong>
+          </div>
+        </div>
+        <p class="hint">{meta()?.infeasible}</p>
       </div>
     </section>
   );

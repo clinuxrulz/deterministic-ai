@@ -582,3 +582,237 @@ button:focus,
     grid-template-columns: 1fr;
   }
 }
+
+/* SAT tab: solver-chosen wiring, and a key space you can walk through. */
+.satlab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.sat-head {
+  grid-column: 1 / -1;
+}
+
+.sat-head h2 {
+  margin: 0;
+  font-size: clamp(22px, 3.4vw, 32px);
+  letter-spacing: -0.02em;
+}
+
+.sat-head .hint {
+  margin: 6px 0 0;
+}
+
+.sat-panel,
+.sat-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.sat-glyphs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.sat-glyph {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--line, #2a2f3a);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sat-glyph:hover,
+.sat-glyph.on {
+  border-color: var(--accent, #6ea8fe);
+}
+
+.sat-glyph.on {
+  background: rgba(110, 168, 254, 0.08);
+}
+
+.sattile {
+  width: 100%;
+  aspect-ratio: 1;
+  display: block;
+  border-radius: 6px;
+  background: #0b0d12;
+  image-rendering: pixelated;
+}
+
+.sattile-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  line-height: 1.25;
+  font-size: 11px;
+  color: var(--muted, #9aa4b5);
+}
+
+.sattile-label strong {
+  font-size: 13px;
+  color: var(--text, #e8ecf5);
+}
+
+.sattile-label .sat-trained {
+  color: var(--accent, #6ea8fe);
+}
+
+.sat-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sat-keyhead {
+  color: var(--muted, #9aa4b5);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-right: 2px;
+}
+
+.sat-bit {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  width: 46px;
+  height: 46px;
+  border-radius: 10px;
+  border: 1px solid var(--line, #2a2f3a);
+  background: #0b0d12;
+  color: var(--text, #e8ecf5);
+  font: 600 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+}
+
+.sat-bit em {
+  font: 400 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-style: normal;
+  color: var(--muted, #9aa4b5);
+  letter-spacing: 0.06em;
+}
+
+.sat-bit:hover {
+  border-color: var(--accent, #6ea8fe);
+  color: var(--accent, #6ea8fe);
+}
+
+.sat-codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sat-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line, #2a2f3a);
+  background: transparent;
+  color: var(--muted, #9aa4b5);
+  font: 600 13px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+}
+
+.sat-chip em {
+  font: 400 10px/1.2 inherit;
+  font-style: normal;
+  color: var(--muted, #9aa4b5);
+  opacity: 0.8;
+}
+
+.sat-chip:hover,
+.sat-chip.on {
+  border-color: var(--accent, #6ea8fe);
+  color: var(--text, #e8ecf5);
+}
+
+.sat-chip.on {
+  background: rgba(110, 168, 254, 0.12);
+}
+
+.sat-recon {
+  width: 100%;
+  max-width: 220px;
+  aspect-ratio: 1;
+  display: block;
+  border-radius: 12px;
+  border: 1px solid var(--line, #2a2f3a);
+  background: #0b0d12;
+  image-rendering: pixelated;
+}
+
+@media (max-width: 760px) {
+  .satlab {
+    grid-template-columns: 1fr;
+  }
+
+  .sat-glyphs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.sat-chipnote {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sat-chipnote code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text, #e8ecf5);
+}
+
+.sat-space {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.sat-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--line, #2a2f3a);
+  background: transparent;
+  cursor: pointer;
+}
+
+.sat-cell:hover,
+.sat-cell.on {
+  border-color: var(--accent, #6ea8fe);
+}
+
+.sat-cell em {
+  font: 400 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-style: normal;
+  color: var(--muted, #9aa4b5);
+  letter-spacing: 0.04em;
+}
+
+@media (max-width: 760px) {
+  .sat-space {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}

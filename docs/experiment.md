@@ -1234,7 +1234,13 @@ Encoding, for a shape given as layer widths:
   others.
 - **Modes.** `full` (autoencoder), `encoder` (can the key separate the
   patterns?), `decoder` (given distinct free keys, can the decoder draw the
-  patterns?), `selftest`, `brute`.
+  patterns?), `functions` (how many functions of the key can the decoder compute
+  at all?), `selftest`, `brute`.
+- **Export.** `--export DIR` writes the witness as two `Circuit` JSON files
+  (`{n_inputs, gates: [{op: "nand", a, b}], outputs}`) plus `meta.json`, which is
+  what the demo's *solver's wiring* tab loads. The exporter re-simulates the
+  written JSON on every glyph and refuses to save a circuit whose trained glyphs
+  do not round-trip, so the browser and the solver cannot drift apart.
 
 The task is 8x8 bitmaps of the letters A-H (64 bits each), in the trainer's
 template: `64 -> 32 -> 16 -> 3 -> 16 -> 32 -> 64`, 163 NAND gates, 3-bit key.
@@ -1264,8 +1270,14 @@ Three real bugs were found this way, which is the argument for the checks:
 - **The soft-equality clause was one-directional.** `sel -> (out = target)` with
   no converse lets the solver leave every selector false, so the cardinality
   bound never binds. Every slack run reported BER 0.4844 with 31 wrong bits per
-  pattern at `slack 1`. The fix is `sel <-> (out != target)`, and the runner now
-  asserts that no pattern exceeds its budget.
+  pattern at `slack 1`.
+- **And then the converse was inverted.** Writing `sel <-> (out = target)`
+  counts *matches*, so `slack 4` demanded "at most four **correct** bits" and
+  returned a model with 60 wrong bits in each image. The correct form is
+  `sel <-> (out != target)`. The runner now asserts that no pattern exceeds its
+  budget, and that assertion is what caught it -- the first version of this
+  checkpoint had a slack table that was wrong in both directions because of
+  this bug.
 - **`separate()` indexed the wrong layer** (the 64-bit output instead of the
   3-bit key), so the "can the encoder separate" question was being asked of the
   decoder's output.
@@ -1273,6 +1285,11 @@ Three real bugs were found this way, which is the argument for the checks:
   a constant key constant-folds every gate: `000` always decodes to all-ones.
   Keys have to be free-but-distinct, and *which* codes are usable is part of the
   problem.
+
+`--mode selftest` now also runs a slack case: it corrupts a witness's target by
+exactly `slack` bits and requires the instance to be SAT *and* every pattern's
+error to stay inside the budget. An encoding that counts matches, or does not
+count at all, fails that test.
 
 ### Exact fit stops at three glyphs
 
@@ -1284,52 +1301,147 @@ Three real bugs were found this way, which is the argument for the checks:
 | 4 | **UNSAT** | 0.1 s |
 | 5, 6, 8 | **UNSAT** | 0.1 s |
 
-0.1 s is not a timeout, it is the full proof. Widening the key to 4 bits does
-not help (also UNSAT at four patterns), and neither does anything I did to the
-decoder: extra same-resolution layers (which are the only *fully mixing* layers
-in this scheme, since a same-size layer's candidate window is the whole previous
-layer) up to five of them, nor 32-wide layers, nor a 7-layer decoder. The
-encoder is not the constraint either -- it separates all eight glyphs.
+0.1 s is not a timeout, it is the full proof. Widening the key does not help --
+4, 5, 6 and 8-bit keys are all UNSAT at eight glyphs in 0.1 s each, and 4 bits
+is already UNSAT at four. Nor does changing the decoder shape:
 
-### Why four glyphs is impossible, and why it is not the solver
+| decoder | 8 glyphs | time |
+|---|---|---|
+| `3→16→32→64` (the trainer's) | UNSAT | 0.1 s |
+| `3→16→16→16→16→16→32→64` (4 extra mixing layers) | UNSAT | 0.3 s |
+| `3→16→64→64` (wider, same-size last layer) | timeout | 330 s |
+| `3→16→16→64→64` (mixing then wide) | UNSAT | 258 s |
+| `3→32→64→64` (wide penultimate) | UNSAT | 19.8 s |
 
-For a decoder of three NAND levels the output bit has a closed form. Level 1
-computes `¬(k_i ∧ k_j)` or `¬k_i` for a pair of key bits; level 2 computes
-`¬(u ∧ v)` over those; level 3 computes `¬(A ∧ B)` over level-2 values, which is
+Same-resolution layers are the only *fully mixing* ones in this scheme (a
+same-size layer's candidate window is the whole previous layer), so the last
+three rows are the strongest tests available inside the template, and none of
+them fits eight glyphs. The encoder is not the constraint either -- it separates
+all eight.
 
-    out = (u ∧ v) ∨ (s ∧ t)
+### Why four glyphs is impossible: the decoder is 16 functions wide
 
-with each of `u, v, s, t` one of the six functions
-`{¬k0, ¬k1, ¬k2, ¬(k0k1), ¬(k0k2), ¬(k1k2)}`. Every such conjunct covers at
-least two of the eight key codes (each of the six sets holds 4 or 6 of the 8
-codes, and their pairwise intersections never drop below 2), so no output bit
-can be true at exactly one key code. But glyph A has such a bit: row 4, column 2 is set in A
-and clear in B, C and D. So four glyphs cannot be decoded by three NAND levels,
-for any key assignment. That matches the solver's UNSAT exactly.
+My first explanation was wrong, and how it was caught is worth recording. From
+`out = (u∧v) ∨ (s∧t)` I argued that no output bit can be true at exactly one key
+code. That is false: the argument is about all eight codes, but only four are in
+use, and a term covering two codes of which one is unused restricts to a
+singleton. Enumerating the reachable functions says a singleton *is* achievable
+on 106 of the 280 (code-subset, code) pairs.
 
-This is the useful part of the result. The gradient trainer would have reported
-"BER 0.19 after 200 epochs" and nobody could say whether the wiring, the
-optimiser, or the template was to blame. SAT says: the template. The decoder has
-no bias inputs, three levels, and a shared node pool, and that is not enough to
-express "one bit set in exactly one of four images".
+The real bound is stronger and easier to state. Ask the solver, for each of the
+256 functions of the three key bits, whether this decoder can compute it (all 64
+output bits set to that function's truth table on all eight codes):
+
+| decoder | functions of the key it can compute |
+|---|---|
+| `3→16→32→64` (the trainer's) | **16 of 256** |
+| `3→16→16→16→16→16→32→64` | 18 of 256 |
+
+An independent enumeration of every function reachable by a chain of
+fully-mixing NAND layers gives the same ceiling: 6 at depth 1, 15 at depth 2, 17
+at depth 3, 18 at depth 4, and nothing new at any greater depth. So the decoder
+is not a universal function of its key at all -- it can draw 16 of the 256
+possible functions of three bits -- and adding depth does not fix it, which is
+exactly what the depth sweep measured.
+
+That also explains the shape of the frontier. With three glyphs the output
+function is pinned at only three of the eight codes, and 15 of the 16 available
+functions agree on any three points (they all have to); with four the constraints
+separate them and no assignment works. It is a property of the *shape*, not of
+these particular glyphs.
+
+This is the useful part of the result. The gradient trainer reports "BER 0.224
+after 2,000 epochs" and there is no way to tell whether the wiring, the
+optimiser or the template is at fault. SAT says: the template, and it says so
+with a number -- 16 functions, not 256 -- rather than with a vibe.
+
+### Memorisation, not generalisation
+
+The three-glyph circuit that fits exactly was then shown the other five glyphs.
+Three of them decode to a trained image bit-for-bit (D to B, G to C, H to A) --
+a lookup table. The other two fall on code `111`, which nothing was trained on,
+so they decode to whatever that code happens to mean, 24 bits from the nearest
+trained glyph:
+
+| held-out glyph | D | E | F | G | H |
+|---|---|---|---|---|---|
+| encoder's code | 011 | 111 | 111 | 110 | 101 |
+| decodes to a trained glyph | B | no | no | C | A |
+| BER vs itself | 0.172 | 0.484 | 0.391 | 0.078 | 0.313 |
+
+Mean over the five is 0.288. Encoding all eight glyphs therefore uses four of
+the eight codes (011, 101, 110, 111) even though only three were trained. An
+exact SAT fit says nothing about unseen data, which is what one should expect
+from a key with fewer codes than the test set has patterns; it is worth stating
+only because "the solver found a circuit that fits" invites the opposite
+reading.
+
+This is what the demo's **solver's wiring** tab shows: the eight glyphs with the
+code the encoder gives each, the eight key codes decoded side by side, and three
+clickable key bits. The four codes nothing asked for still decode to definite
+images -- all-ones for `000`, all-zeros for `111`, and blobs in between -- which
+is a more direct demonstration of the 16-of-256 limit than the table above.
 
 ### Slack: what a little loss buys
 
 Minimum wrong bits per pattern, per glyph count (`--slack`), full autoencoder,
 3-bit key:
 
-| glyphs | slack 0 | 2 | 4 | 8 | 16 |
-|---|---|---|---|---|---|
-| 4 | UNSAT 0.2 s | UNSAT 7.6 s | SAT 8.9 s | SAT 2.3 s | SAT 0.8 s |
-| 8 | UNSAT 0.3 s | -- | UNSAT 59 s | timeout 60 s | SAT 1.1 s |
+| glyphs | slack 0 | 1 | 2 | 3 | 4 | 6 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|
+| 4 | UNSAT 0.1 s | UNSAT 0.8 s | UNSAT 3.9 s | **SAT** 5.7 s | SAT 0.5 s | SAT 0.6 s | SAT 1.4 s | — |
+| 8 | UNSAT 0.3 s | — | — | — | UNSAT 91 s | timeout 361 s | **SAT** 291 s | SAT 268 s |
 
-So the answer to "can I allow a little loss" is yes, and it is quantified: with
-four glyphs, two wrong bits per image is still provably impossible and four is
-enough; with eight, four is impossible and sixteen works. Note what slack buys
-and what it does not: it makes the instance easy (all the SAT rows are under a
-second) because the solver may now pick a degenerate constant circuit *if* the
-budget allows it, which is why the per-pattern bound has to be small enough that
-a constant cannot pass.
+For eight glyphs the threshold is slack 8, so the minimum error is somewhere in
+6-8 wrong bits per pattern: slack 8 is satisfiable (BER 0.1172, 7.5 bits per
+pattern) and slack 4 is not, while slack 6 did not finish in six minutes. That
+is a wide bracket, and it is honest to leave it as one. (Slack 9 also comes back
+SAT, which is what "at most 9" should do if 8 is feasible; it adds nothing but
+one more consistency check.)
+
+A slack bound is a *feasibility* test, not an optimiser, and the numbers say so:
+slack 10 returned BER 0.1504, worse than slack 8, because nothing asked for the
+minimum. Finding the true optimum is a MaxSAT problem (RC2 or a linear-search
+counter with a bound tightening on every model); the decision problem here only
+gives upper and lower brackets.
+
+The time curve is also not monotone in the obvious direction -- for four glyphs,
+slack 0 takes 0.1 s and slack 2 takes 3.9 s -- because a looser bound is a
+bigger search problem *and* a weaker contradiction.
+
+### What the gradient trainer does on the same task
+
+Feasibility is not the same as findability, and the two are worth separating. I
+wrote the same eight glyphs out as an `XAE4` dataset
+(`scripts/make_glyph_dataset.py`, 4 copies each so the trainer has a val split)
+and trained the trainer's own config on them (`configs/glyphs8_nand.toml`,
+`n_local = 9`, `n_global = 3`, product relaxation, 12,000 epochs — the default
+200 is far too few at 64 input bits):
+
+| glyphs | SAT says | `train-nand` | gates after simplify |
+|---|---|---|---|
+| 3 | exact fit exists, 0.1 s | BER 0.0365 (2.3 bits of 64) | 73 |
+| 8 | infeasible; slack 8 → 0.1172 | BER 0.1426 (9.1 bits of 64) | 91 |
+
+Three readings:
+
+- **The trainer finds the feasible case but does not solve it.** An exact fit is
+  provably there and 12,000 epochs reach 0.0365, not 0. The gap is small in
+  pixels and infinite in the sense that matters: one glyph is still wrong.
+- **At 2,000 epochs it is nowhere near** (BER 0.224 on the same 3 glyphs), so
+  the earlier "the trainer cannot fit even 3 glyphs" reading was just an
+  under-trained run. Feasibility claims about this trainer need a long schedule.
+- **On the infeasible case the trainer is close to the SAT bound** — 0.1426 vs
+  0.1172 — which is the expected result if the deficit is the template rather
+  than the optimiser. The trainer is finding a good circuit in a space that does
+  not contain a perfect one.
+
+Caveat, because it matters for the comparison: the trainer does not search the
+SAT window. `wire_candidates` draws `n_local` random picks inside `window(...)`
+plus `n_global` long-range picks, so its space is a *sampled* subset of the
+solver's. A SAT witness is therefore not necessarily reachable by the trainer,
+and these numbers are a sanity check on the feasibility claim, not a race
+between the two methods.
 
 ### What this establishes
 
@@ -1338,16 +1450,26 @@ a constant cannot pass.
   limits are shape, not size.
 - **The template is the binding constraint, and it breaks early.** Three glyphs
   out of eight, on the smallest task in the repo. That is the same hierarchical
-  wiring (local windows, 2^depth dependency cap) that the 32x32 model uses.
+  wiring (local windows, 2^depth dependency cap) the 32x32 model uses, and the
+  measured reason is that the decoder can compute only 16 of the 256 functions
+  of its key.
 - **Infeasibility is cheap to prove and expensive to guess.** The gradient
   trainer's failure on a shape looks identical to an optimiser problem; the SAT
-  answer distinguishes them in a tenth of a second.
+  answer distinguishes them in a tenth of a second, and slack turns it into a
+  number.
+- **A soft-equality encoding is easy to get wrong in three different ways**, all
+  of which still return "SAT". The `selftest`/`brute`/bound-assertion checks are
+  the only reason the numbers above can be trusted.
 
-Untested, and the obvious next questions: a template that is actually feasible
-for eight glyphs (what is the minimum gate count for an exact fit?), whether
-SAT-found circuits generalise to held-out glyphs or just memorise, and whether a
-32x32-ish shape of the trainer's design is feasible at all for a handful of
-images. The encoder is general over layer widths, so those are all one flag away.
+Untested, and the obvious next questions: what shape *is* feasible for eight
+glyphs (the function-count measurement above says it needs either more key bits
+or same-resolution mixing in the decoder -- the encoder is general over layer
+widths, so this is a shape search, not a solver problem); whether a 32x32-ish
+shape of the trainer's design is feasible for a handful of images; and whether
+the 16-of-256 measurement reproduces on the shipped 32x32 decoder, where each
+output bit's cone covers more key bits so the function count should be far
+larger -- if it is not, the template is the explanation for the 0.17 BER plateau
+rather than capacity.
 
 ### Reproduce
 
@@ -1376,6 +1498,19 @@ done
 
 # smaller decoder/impossible-by-construction checks
 python3 scripts/sat_ae.py --solver $K --patterns 8 --slack 4   # UNSAT
-python3 scripts/sat_ae.py --solver $K --patterns 8 --slack 16  # SAT
+python3 scripts/sat_ae.py --solver $K --patterns 8 --slack 8   # SAT, ~5 min
+
+# how many functions of the key the decoder can compute (3-bit keys only)
+python3 scripts/sat_ae.py --solver $K --mode functions --shape 3,16,32,64
+python3 scripts/sat_ae.py --solver $K --mode functions --shape 3,16,16,16,16,16,32,64
+
+# export the 3-glyph witness as browser circuits for the demo's SAT tab
+python3 scripts/sat_ae.py --solver $K --patterns 3 --export web/public/sat
+
+# the gradient trainer on identical data, for comparison
+python3 scripts/make_glyph_dataset.py --out data/glyphs8.bin
+python3 scripts/make_glyph_dataset.py --out data/glyphs3.bin --glyphs ABC
+cargo run --release -p xorae -- train-nand --config configs/glyphs8_nand.toml \
+  --data data/glyphs3.bin --out runs/glyphs3_nand --epochs 12000
 ```
 

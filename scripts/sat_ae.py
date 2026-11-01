@@ -20,11 +20,15 @@ one copy per example. No free variables: the only latitude is the wiring.
 
 Modes:
 
-* ``full``    - autoencoder: fit the patterns through the key (default)
-* ``encoder`` - encoder only: the key must simply *separate* the patterns
-* ``selftest``- generate a random wiring, let it define the targets, and check
-                the encoding accepts the witness. A selftest failure means the
-                encoder is wrong, not that the shape is infeasible.
+* ``full``     - autoencoder: fit the patterns through the key (default)
+* ``encoder``  - encoder only: the key must simply *separate* the patterns
+* ``decoder``  - decoder only, keys free but distinct
+* ``functions``- how many functions of the key the decoder can compute at all
+* ``selftest`` - generate a random wiring, let it define the targets, and check
+                 the encoding accepts the witness. A selftest failure means the
+                 encoder is wrong, not that the shape is infeasible.
+* ``brute``    - enumerate every wiring of a tiny shape and compare with the
+                 solver; the check that rules out an over-constrained encoding
 
 Usage::
 
@@ -34,6 +38,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import subprocess
 import sys
@@ -141,6 +146,7 @@ class Net:
         self.sizes = sizes
         self.gates: list[dict] = []
         self.value_vars: list[list[list[int]]] = []
+        self.selectors: list[list[int]] = []
 
     def key_layer(self) -> int:
         """Index of the narrowest layer: the key (or the input, if narrower)."""
@@ -214,10 +220,11 @@ class Net:
                     # the solver leave every selector false.
                     sel = cnf.var()
                     selectors.append(sel)
-                    cnf.add([-sel, lit])
-                    cnf.add([sel, -lit])
+                    cnf.add([-sel, -lit])
+                    cnf.add([sel, lit])
             if slack > 0:
                 at_most_k(cnf, selectors, slack)
+            self.selectors.append(selectors)
 
     def separate(self, cnf: Cnf, layer: int = -1) -> None:
         """Require every pair of patterns to land on a different key-level value."""
@@ -295,6 +302,107 @@ def run(solver: str, cnf: Cnf, timeout: float, workdir: Path):
     if any(line.startswith("s UNSATISFIABLE") for line in text.splitlines()):
         return "unsat", elapsed, None
     return "unknown", elapsed, None
+
+
+def circuit_json(net: "Net", wiring: list[tuple[int, int]], base_layer: int,
+                 last_layer: int) -> dict:
+    """Serialise layers ``base_layer+1 .. last_layer`` as a ``Circuit`` dict.
+
+    Wire numbering follows ``crates/core/src/circuit.rs``: inputs are wires
+    ``0..n_inputs-1``, wires ``n_inputs`` and ``n_inputs+1`` are the constants 0
+    and 1, and gate ``i``'s output is wire ``n_inputs + 2 + i``. Layer
+    ``base_layer`` is the sub-circuit's input layer, so the encoder and the
+    decoder can be exported separately even though the SAT net is one chain.
+    """
+    n_inputs = net.sizes[base_layer]
+    pos = {(g["layer"], g["node"]): i for i, g in enumerate(net.gates)}
+    wire = {(base_layer, i): i for i in range(n_inputs)}
+    gates: list[dict] = []
+    for layer in range(base_layer + 1, last_layer + 1):
+        for node in range(net.sizes[layer]):
+            index = pos[(layer, node)]
+            cands = net.gates[index]["cands"]
+            index_a, index_b = wiring[index]
+            gates.append({"op": "nand",
+                          "a": wire[(layer - 1, cands[index_a])],
+                          "b": wire[(layer - 1, cands[index_b])]})
+            wire[(layer, node)] = n_inputs + 2 + len(gates) - 1
+    outputs = [wire[(last_layer, node)] for node in range(net.sizes[last_layer])]
+    return {"n_inputs": n_inputs, "gates": gates, "outputs": outputs}
+
+
+def eval_circuit(circuit: dict, inputs: list[int]) -> list[int]:
+    """Reference evaluator for the exported JSON -- independent of `Net`."""
+    n = circuit["n_inputs"]
+    wires = list(inputs[:n]) + [0, 1] + [0] * len(circuit["gates"])
+    for i, gate in enumerate(circuit["gates"]):
+        a, b = wires[gate["a"]], wires[gate["b"]]
+        wires[n + 2 + i] = 0 if (a and b) else 1
+    return [wires[out] for out in circuit["outputs"]]
+
+
+def export_web(net: "Net", assignment: dict[int, bool], names: list[str],
+               out_dir: Path, solver: str, elapsed: float) -> bool:
+    """Write the witness as circuits the browser can run, plus its metadata."""
+    wiring = [(read_index(assignment, g["a_bits"]), read_index(assignment, g["b_bits"]))
+              for g in net.gates]
+    key_layer = net.key_layer()
+    last = len(net.sizes) - 1
+    encoder = circuit_json(net, wiring, 0, key_layer)
+    decoder = circuit_json(net, wiring, key_layer, last)
+
+    glyphs_meta = []
+    for name in GLYPHS:
+        bits = glyphs([name], net.sizes[0])[0]
+        code = eval_circuit(encoder, bits)
+        recon = eval_circuit(decoder, code)
+        wrong = sum(a != b for a, b in zip(recon, bits))
+        glyphs_meta.append({
+            "name": name,
+            "bits": bits,
+            "code": "".join(str(b) for b in code),
+            "trained": name in names,
+            "wrong_bits": wrong,
+        })
+        if name in names and wrong:
+            print(f"EXPORT BROKEN: trained glyph {name} decodes with {wrong} wrong bits")
+            return False
+
+    keys = [g["code"] for g in glyphs_meta]
+    trained_codes = [g["code"] for g in glyphs_meta if g["trained"]]
+    print(f"exported {len(encoder['gates'])}+{len(decoder['gates'])} gates; "
+          f"trained codes {trained_codes}, all codes {keys}, "
+          f"held-out errors {[g['wrong_bits'] for g in glyphs_meta if not g['trained']]}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "circuit.json").write_text(json.dumps(
+        {"encoder": encoder, "decoder": decoder}, separators=(",", ":")))
+    meta = {
+        "side": 8,
+        "key_bits": net.sizes[key_layer],
+        "shape": "-".join(map(str, net.sizes)),
+        "gates": len(net.gates),
+        "solver": solver.rsplit("/", 1)[-1],
+        "seconds": round(elapsed, 2),
+        "trained": names,
+        "trained_codes": trained_codes,
+        "used_codes": sorted(set(keys)),
+        "glyphs": glyphs_meta,
+        "infeasible": (
+            "Kissat proves no wiring of this shape fits four glyphs: the "
+            "3-level decoder can compute only 16 of the 256 functions of a "
+            "3-bit key, so each output bit is identical on at least two of "
+            "any four codes."
+        ),
+        "note": (
+            "Every gate is NAND, so the circuit is nothing but wire numbers. "
+            "The key has 3 bits, which is 8 codes, and only the trained "
+            "ones were asked for: the other codes are whatever the decoder "
+            "happens to compute there."
+        ),
+    }
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return True
 
 
 def glyphs(names: list[str], width: int) -> list[list[int]]:
@@ -391,6 +499,67 @@ def brute(solver: str, sizes: list[int], n_patterns: int, trials: int, seed: int
     return ok
 
 
+def slacktest(solver: str, sizes: list[int], n_patterns: int, slack: int,
+              corrupt: int, timeout: float, seed: int) -> bool:
+    """Corrupt a witness and require slack to accept it within its bound.
+
+    The witness fits with exactly `corrupt` wrong bits in pattern 0, so the
+    instance must be SAT and every pattern's error must stay within `slack`.
+    A bound that is not enforced, or one enforced on *matches*, fails here.
+    """
+    rng = random.Random(seed)
+    inputs = [[rng.getrandbits(1) for _ in range(sizes[0])] for _ in range(n_patterns)]
+    probe = Net(sizes)
+    probe.build(Cnf(), inputs, inputs, 0)
+    wiring = [(rng.randrange(len(g["cands"])), rng.randrange(len(g["cands"])))
+              for g in probe.gates]
+    targets = [simulate_wiring(probe, wiring, p) for p in inputs]
+    for bit in rng.sample(range(sizes[-1]), corrupt):
+        targets[0][bit] ^= 1
+
+    cnf = Cnf()
+    net = Net(sizes)
+    net.build(cnf, inputs, targets, slack)
+    workdir = Path(tempfile.mkdtemp(prefix="sat_slack_"))
+    status, elapsed, model = run(solver, cnf, timeout, workdir)
+    ok = status == "sat"
+    if ok:
+        wrong = [sum(a != b for a, b in zip(simulate(net, model, p), t))
+                 for p, t in zip(inputs, targets)]
+        ok = all(w <= slack for w in wrong)
+    print(f"slacktest {len(sizes)}-layer, {n_patterns} patterns, slack {slack}, "
+          f"{corrupt} corrupt bits: {'ok' if ok else 'FAILED'} "
+          f"({status} in {elapsed:.1f}s)")
+    return ok
+
+
+def function_table(solver: str, sizes: list[int], timeout: float) -> int:
+    """How many functions of the key can this decoder compute?
+
+    Only meaningful for a 3-bit key: 2^(2^3) = 256 functions, one SAT call each.
+    This is the measurement that explains the glyph frontier -- the trainer's
+    decoder turns out to compute 16 of the 256, and no depth fixes it.
+    """
+    bits = sizes[0]
+    if bits > 3:
+        print(f"function_table: {bits}-bit key needs 2^{2 ** bits} calls; use <= 3")
+        return 0
+    codes = [[(c >> b) & 1 for b in range(bits)] for c in range(1 << bits)]
+    found = []
+    for f in range(1 << (1 << bits)):
+        targets = [[(f >> c) & 1] * sizes[-1] for c in range(1 << bits)]
+        cnf = Cnf()
+        net = Net(sizes)
+        net.build(cnf, codes, targets, 0)
+        status, _, _ = run(solver, cnf, timeout, Path(tempfile.mkdtemp(prefix="sat_fn_")))
+        if status == "sat":
+            found.append(f)
+    total = 1 << (1 << bits)
+    print(f"decoder {'-'.join(map(str, sizes))}: {len(found)}/{total} functions of "
+          f"the {bits}-bit key realisable")
+    return len(found)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -400,11 +569,13 @@ def main() -> int:
                         help="number of glyphs to fit (default all 8)")
     parser.add_argument("--slack", type=int, default=0,
                         help="maximum wrong output bits per pattern")
-    parser.add_argument("--mode", choices=["full", "encoder", "decoder", "selftest", "brute"],
+    parser.add_argument("--mode", choices=["full", "encoder", "decoder", "selftest", "brute", "functions"],
                         default="full")
     parser.add_argument("--solver", default="kissat", help="SAT solver binary")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--keep", help="copy the CNF here for inspection")
+    parser.add_argument("--export", metavar="DIR",
+                        help="write the witness as browser circuits + meta.json")
     parser.add_argument("--csv", action="store_true", help="one machine-readable line")
     args = parser.parse_args()
 
@@ -412,9 +583,14 @@ def main() -> int:
     if args.mode == "selftest":
         ok = all(selftest(args.solver, sizes, n, args.timeout, seed)
                  for n, seed in [(1, 1), (2, 2), (3, 3), (4, 4), (8, 5)])
+        ok = slacktest(args.solver, sizes, 4, 5, 5, args.timeout, 6) and ok
+        ok = slacktest(args.solver, sizes, 4, 0, 0, args.timeout, 7) and ok
         return 0 if ok else 1
     if args.mode == "brute":
         return 0 if brute(args.solver, sizes, args.patterns, 12, 1) else 1
+    if args.mode == "functions":
+        function_table(args.solver, sizes, args.timeout)
+        return 0
 
     names = list(GLYPHS)[: args.patterns]
     if args.mode == "encoder":
@@ -471,6 +647,9 @@ def main() -> int:
         keys = ["".join(str(int(model.get(key[b][p], False))) for b in range(len(key)))
                 for p in range(len(patterns))]
         print(f"keys {keys} ({len(set(keys))} distinct of {2 ** len(key)})")
+        if args.export and args.mode == "full":
+            if not export_web(net, model, names, Path(args.export), args.solver, elapsed):
+                return 1
     return 0
 
 

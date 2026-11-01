@@ -33,8 +33,9 @@ described by its wiring.
 It is the default entry in `web/public/models/index.json` and is verified in a
 headless browser (128 key bits, 8 samples, no JS errors).
 
-The demo has three tabs: **reconstruct** (the models above), **draw a digit**
-(MNIST autoencoder + NAND classifier) and **cat gan**. The digit tab normalises
+The demo has four tabs: **reconstruct** (the models above), **draw a digit**
+(MNIST autoencoder + NAND classifier), **cat gan**, and **solver's wiring**.
+The digit tab normalises
 a canvas stroke the way MNIST preprocessing does (bbox -> 20x20 -> centre of
 mass -> 28x28), encodes it, and runs the classifier circuit from
 `web/public/digits/classifier.json` via `run_circuit`. `?tab=digits&selftest=1`
@@ -48,6 +49,17 @@ texture) but not anatomy, and only about 15 of its 96 latent bits change the
 output — `effective_latent` in `web/public/gan/meta.json`, measured by flipping
 each bit offline. The tab is titled "This cat is not real."; `?tab=gan&selftest=1`
 renders a deterministic grid for headless checks.
+
+The **solver's wiring** tab is the 8x8/3-bit witness from
+`scripts/sat_ae.py` (Checkpoint 12), written by `--export web/public/sat`: eight
+glyphs with the code the encoder gives each, all eight key codes decoded side by
+side, and three clickable key bits. Clicking a glyph runs the encoder
+(`sat/circuit.json`, 51 gates) and decodes the resulting key (112 gates), so the
+tab exercises both halves through `run_circuit`. The point is the key space:
+three codes were trained, a fourth is reached by the held-out glyphs, and the
+other four are codes nothing asked for that still decode to definite images.
+`?tab=sat&selftest=1` requires all three trained glyphs to round-trip with zero
+wrong bits and prints `self-test · 3/3 ...` — that is the headless check.
 
 Note for Solid 2.0: signal writes are scheduled, so reading a signal immediately
 after setting it returns the stale value. Pass values explicitly instead (the
@@ -271,7 +283,8 @@ cargo run --release -p xorae -- export \
 | `crates/cli/src/ga.rs` | Genetic algorithm, fitness, evaluation |
 | `crates/cli/src/dataset.rs` | CIFAR loader, planar fix, `XAE4` format, palette/colour modes |
 | `crates/wasm/src/lib.rs` | `wasm-bindgen` bridge |
-| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder` modes |
+| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions` modes |
+| `scripts/make_glyph_dataset.py` | writes the 8×8 glyphs as `XAE4` so `train-nand` can train on the same data |
 | `web/src/App.tsx` | Solid 2.0 UI |
 
 ## How the NAND trainer works
@@ -340,12 +353,29 @@ is a usable oracle, not a research toy; CaDiCaL 3.0 agrees on every CNF.
 
 Validation is built in and is not optional: `--mode selftest` generates a random
 wiring, lets it define the targets, and requires the solver to find one (a
-witness exists by construction); `--mode brute` enumerates every wiring on a
-tiny shape and compares SAT/UNSAT; `--mode encoder`/`decoder` attribute an UNSAT
-to one half of the net. Three bugs were caught this way, including a
-one-directional soft-equality clause that made every slack bound unbindable
-while still returning "SAT". Do not quote an UNSAT without selftest + brute
-agreement.
+witness exists by construction) plus a slack case that corrupts a witness by
+exactly the budget; `--mode brute` enumerates every wiring on a tiny shape and
+compares SAT/UNSAT; `--mode encoder`/`decoder` attribute an UNSAT to one half of
+the net; `--mode functions` counts how many functions of a 3-bit key the decoder
+can compute at all. Four bugs were caught this way, three of them in the
+soft-equality clause — one-directional, then inverted so `slack 4` meant "at
+most 4 *correct* bits" — each of which still returned a confident "SAT". Do not
+quote an UNSAT without selftest + brute agreement, and do not quote a slack
+number without the runner's per-pattern bound assertion.
+
+`scripts/make_glyph_dataset.py` writes the same glyphs as `XAE4` for
+`train-nand` (`configs/glyphs8_nand.toml`, 4-bit key because the trainer cannot
+derive a 3-wide bottleneck). On 3 glyphs SAT proves an exact fit and 12,000
+epochs of the trainer reach BER 0.0365 (73 gates); on 8 glyphs the trainer
+reaches 0.1426 against the SAT slack-8 bound of 0.1172 — close, as expected if
+the deficit is the template. Note the trainer samples its candidate window, so a
+SAT witness is not necessarily reachable by it.
+
+`--export web/public/sat` writes a witness as two plain `Circuit` JSON objects
+plus `meta.json`, and the exporter re-simulates them on every glyph before
+saving, so a broken export fails loudly instead of shipping. That is what the
+demo's *solver's wiring* tab runs; regenerate it with
+`python3 scripts/sat_ae.py --patterns 3 --export web/public/sat`.
 
 ## What has been ruled out (with evidence)
 
@@ -374,7 +404,7 @@ Do not spend time re-running these.
 | Gödel `min` as the default | Better at equal training budget (−0.0089 over 10 seeds) but much worse at equal size: pruned to 1,400 gates it scores 0.2154 vs 0.1811 for product (0/5 seeds win). Its extra gates are load-bearing |
 | **24-bit RGB (`--rgb8`)** | 16×16: abs MAE **0.2120** vs mean image 0.2031 (16,128 gates). 4×4: **0.2382** vs 0.1665 (1,008 gates). Cannot memorise 100 images either (train BER 0.3839 at 16×16 after ~18,700 updates, vs 0.1741 for grayscale). Half the planes are noise — see Checkpoint 11 |
 | 4×4 with more rate / mixing / depth / width | Key 48→96→192: abs MAE 0.2411 / **0.2325** (BER falls 0.4425→0.4110, but the gain is entirely in the noise planes). Cross-plane candidates: 0.2396. Same-resolution layers (8 levels instead of 4): 0.2764, same memorisation number (0.4130). Overcomplete first layer (3,312 gates, 5 levels per side): 0.2319, best of the family, 2.6× the gates for 0.006 MAE and memorisation 0.3977. Nothing approaches the 0.1665 bar |
-| SAT-solved wiring on 8×8 glyphs (`scripts/sat_ae.py`) | Kissat 4.0.1 proves the trainer's template `64→32→16→3→16→32→64` (163 gates) fits 1–3 glyphs exactly and is **UNSAT at 4**, in 0.1 s (CaDiCaL 3.0 agrees). Not the key size and not the encoder: a 3-bit key separates all 8 glyphs, but the 3-level decoder computes only `(u∧v)∨(s∧t)` over six functions of the key, and no such bit can be set in exactly one of four glyphs. Deeper/wider decoders and a 4-bit key change nothing. Exact fit tops out at 3 of 8; slack 4 wrong bits per pattern is SAT, 2 is UNSAT |
+| SAT-solved wiring on 8×8 glyphs (`scripts/sat_ae.py`) | Kissat 4.0.1 proves the trainer's template `64→32→16→3→16→32→64` (163 gates) fits 1–3 glyphs exactly and is **UNSAT at 4**, in 0.1 s (CaDiCaL 3.0 agrees). Not the key size and not the encoder: a 3-bit key separates all 8 glyphs, but the decoder computes only **16 of the 256 functions** of a 3-bit key (18 with 5 extra mixing layers, 18 at *any* depth), so four glyphs cannot be decoded by any key assignment. Wider keys (4/5/6/8 bits), 4 extra same-resolution layers, and 32-wide decoders change nothing. Exact fit tops out at 3 of 8; the minimum slack is 3 wrong bits per pattern for 4 glyphs and 8 for 8 glyphs (BER 0.1172). A 3-glyph exact circuit is pure lookup: all 5 held-out glyphs decode bit-exactly to one of the 3 trained images |
 
 ## Open threads, in priority order
 

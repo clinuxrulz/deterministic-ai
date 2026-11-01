@@ -1,0 +1,35 @@
+# 8x8 glyph autoencoder, same template the SAT encoder searches.
+#
+# 64 -> 32 -> 16 -> 4-bit key -> 16 -> 32 -> 64, i.e. 163 NAND gates. The point
+# of this config is a like-for-like comparison with scripts/sat_ae.py: the SAT
+# solver proves 1-3 glyphs is feasible and 4 is not, so the question here is
+# whether gradient descent finds the feasible ones and what it does when the
+# target is impossible.
+image_size = 8
+key_bits = 4
+hidden = [32, 16]
+
+# 24 training rows (8 glyphs x 3) at batch 8 is three updates per epoch.
+epochs = 4000
+batch = 8
+lr = 0.01
+
+n_local = 9
+n_global = 3
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.05
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+polish_sweeps = 2
+polish_samples = 24
+
+relaxation = "product"
+
+seed = 42
+log_every = 200
+val_every = 200
