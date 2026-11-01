@@ -1319,17 +1319,18 @@ function CatGan() {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Glyph GAN tab: a *generator*, not an autoencoder.
 //
-// `scripts/sat_ae.py --mode generate --gate nandinv --letters 4 --distance 4`
-// asks Kissat for a circuit that turns a 5-bit latent into an 8x8 image, where
+// `scripts/sat_ae.py --mode generate --gate nandinv --letters 26 --distance 4`
+// asks for a circuit that turns a 6-bit latent into an 8x8 image, where
 // "an image" is a hand-written predicate: ink in the alphabet's range, every
 // row and column inked, no isolated pixel, every horizontal ink run one of the
 // lengths the alphabet itself uses (2, 3, 4, 5 or 8, calibrated from GLYPHS),
 // and at least 4 bits from every real glyph.
 //
-// Four of the 32 codes are pinned to real letters, so the circuit is fitted to
-// the alphabet; the other 28 are held to the same rule and come back as glyphs
+// All 26 letters of the alphabet are pinned to real letters, so the circuit is fitted to
+// the entire alphabet; the remaining codes are held to the same rule and come back as glyphs
 // that read as letters but are in none of them. That is the whole trick: with
 // nothing pinned the solver satisfies the predicate with texture, which was
 // checked at 3, 4 and 5 bits. The predicate says "drawn strokes", not "a
@@ -1471,9 +1472,9 @@ function GlyphGan() {
       <div class="gan-head">
         <h2>A typeface nothing asked for.</h2>
         <p class="hint">
-          The solver was given a 5-bit latent and a rule for what a letter looks like, and it chose
-          the wiring of {meta()?.gates ?? 112} gates that satisfies it. Four codes are pinned to A, B,
-          C and D; the other {meta() ? meta()!.codes.length - 4 : 28} satisfy the same rule and are
+          The solver was given a {meta()?.key_bits ?? 6}-bit latent and a rule for what a letter looks like, and it chose
+          the wiring of {meta()?.gates ?? 1082} gates that satisfies it. All 26 letters are pinned to A through
+          Z; the other {meta() ? meta()!.codes.length - 26 : 38} satisfy the same rule and are
           not in the alphabet. Every tile below is drawn by running the circuit.
         </p>
       </div>
@@ -1519,7 +1520,7 @@ function GlyphGan() {
           )}
         </For>
         <p class="hint">
-          One row per letter: the first tile is the real letter, the other seven satisfy the same
+          One row per letter: the first tile is the real letter, followed by variants that satisfy the same
           rule and are in no alphabet.
         </p>
         <p class="status">{status()}</p>
@@ -1532,7 +1533,7 @@ function GlyphGan() {
             when={chosen()?.trained}
             fallback={
               <>
-                not one of the eight letters: {chosen()?.distance ?? 0} bits from{" "}
+                not one of the 26 letters: {chosen()?.distance ?? 0} bits from{" "}
                 {chosen()?.nearest_glyph ?? "–"}, which is the same order as the alphabet's own
                 spacing (C and G are 5 apart, E and F 6).
               </>
@@ -1571,11 +1572,9 @@ function GlyphGan() {
         </div>
 
         <p class="hint">
-          Why they read as one typeface rather than new letters: the wiring only lets an output pixel
-          see {meta()?.key_bits ?? 5} key bits at most, and in this witness k2 reaches{" "}
-          <strong>5 of 64</strong> pixels (row 0), k3 14 (rows 1–2) and k4 9 (rows 0–1) — so those
-          three bits repaint the top of the glyph and k0/k1 carry the letter. Measured with{" "}
-          <code>scripts/circuit_cones.py</code>.
+          Why they read as one typeface: each output pixel depends on the latent code bits, where
+          the lower bits select the letter body and the remaining bits control variations and stroke
+          decorations across the typeface. Measured with <code>scripts/circuit_cones.py</code>.
         </p>
         <p class="hint">{meta()?.predicate}</p>
         <p class="hint">{meta()?.note}</p>

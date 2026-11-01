@@ -33,8 +33,8 @@ described by its wiring.
 It is the default entry in `web/public/models/index.json` and is verified in a
 headless browser (128 key bits, 8 samples, no JS errors).
 
-The demo has four tabs: **reconstruct** (the models above), **draw a digit**
-(MNIST autoencoder + NAND classifier), **cat gan**, and **solver's wiring**.
+The demo has five tabs: **reconstruct** (the models above), **draw a digit**
+(MNIST autoencoder + NAND classifier), **cat gan**, **glyph gan**, and **solver's wiring**.
 The digit tab normalises
 a canvas stroke the way MNIST preprocessing does (bbox -> 20x20 -> centre of
 mass -> 28x28), encodes it, and runs the classifier circuit from
@@ -51,19 +51,16 @@ each bit offline. The tab is titled "This cat is not real."; `?tab=gan&selftest=
 renders a deterministic grid for headless checks.
 
 The **glyph gan** tab is a *generator* rather than an autoencoder: `--mode
-generate` in `scripts/sat_ae.py` asks Kissat for a circuit that turns a 5-bit
+generate` in `scripts/sat_ae.py` produces a circuit that turns a 6-bit
 latent into an 8x8 image satisfying a predicate (ink range, every row and column
 inked, no isolated pixel, every horizontal ink run a length the alphabet uses,
-at least 4 bits from every real glyph). Four of the 32 codes are pinned to A-D;
-the other 28 are the point. `web/public/gan8/` holds the 112-gate circuit and
+at least 4 bits from every real glyph). All 26 letters (A-Z) of the alphabet
+are pinned; the remaining codes are the variants. `web/public/gan8/` holds the 1,082-gate circuit and
 its metadata, and every tile is drawn by running the circuit, not by reading the
-JSON, so `?tab=glyphs&selftest=1` prints `self-test · 32/32 codes reproduce ·
-4/4 letters exact · 112 gates`. The tab is titled "A typeface nothing asked
-for." and says plainly why the variants share a body with the pinned letter: the
-cone analysis (k2 reaches 5 of 64 pixels, k4 9, k3 14) means three latent bits
-only repaint the top. Regenerate with
-`python3 scripts/sat_ae.py --mode generate --shape 5,16,32,64 --gate nandinv
---letters 4 --distance 4 --export web/public/gan8`.
+JSON, so `?tab=glyphs&selftest=1` prints `self-test · 64/64 codes reproduce ·
+26/26 letters exact · 1082 gates`. The tab is titled "A typeface nothing asked
+for." and renders one row per letter with the real letter followed by typeface
+variants.
 
 The **solver's wiring** tab is the 8x8/3-bit witness from
 `scripts/sat_ae.py` (Checkpoint 12), written by `--export web/public/sat`: eight
