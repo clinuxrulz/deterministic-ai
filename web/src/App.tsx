@@ -83,17 +83,25 @@ function runImage(image: HTMLImageElement, model: ModelHandle): InferenceResult 
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
-  const [tab, setTab] = createSignal<"reconstruct" | "digits" | "gan" | "glyphs" | "sat">(
-    params.get("tab") === "digits"
-      ? "digits"
-      : params.get("tab") === "gan"
-        ? "gan"
-        : params.get("tab") === "glyphs"
-          ? "glyphs"
-          : params.get("tab") === "sat"
-            ? "sat"
-          : "reconstruct",
-  );
+  type Tab = "reconstruct" | "digits" | "gansat" | "gangrad" | "glyphs" | "sat";
+  const initialTab = (value: string | null): Tab => {
+    switch (value) {
+      case "digits":
+        return "digits";
+      case "gan":
+      case "gansat":
+        return "gansat";
+      case "gangrad":
+        return "gangrad";
+      case "glyphs":
+        return "glyphs";
+      case "sat":
+        return "sat";
+      default:
+        return "reconstruct";
+    }
+  };
+  const [tab, setTab] = createSignal<Tab>(initialTab(params.get("tab")));
   const [models, setModels] = createSignal<ModelEntry[]>([]);
   const [selectedId, setSelectedId] = createSignal("");
   const [samples, setSamples] = createSignal<SampleEntry[]>([]);
@@ -359,10 +367,16 @@ export default function App() {
           draw a digit
         </button>
         <button
-          class={tab() === "gan" ? "tab active" : "tab"}
-          onClick={() => setTab("gan")}
+          class={tab() === "gansat" ? "tab active" : "tab"}
+          onClick={() => setTab("gansat")}
         >
-          cat gan
+          cat gan · sat
+        </button>
+        <button
+          class={tab() === "gangrad" ? "tab active" : "tab"}
+          onClick={() => setTab("gangrad")}
+        >
+          cat gan · grad
         </button>
         <button
           class={tab() === "glyphs" ? "tab active" : "tab"}
@@ -385,14 +399,21 @@ export default function App() {
           when={tab() === "digits"}
           fallback={
             <Show
-              when={tab() === "gan"}
+              when={tab() === "gansat"}
               fallback={
-                <Show when={tab() === "glyphs"} fallback={<SatLab />}>
-                  <GlyphGan />
+                <Show
+                  when={tab() === "gangrad"}
+                  fallback={
+                    <Show when={tab() === "glyphs"} fallback={<SatLab />}>
+                      <GlyphGan />
+                    </Show>
+                  }
+                >
+                  <CatGan track={CAT_GRAD} />
                 </Show>
               }
             >
-              <CatGan />
+              <CatGan track={CAT_SAT} />
             </Show>
           }
         >
@@ -1084,25 +1105,44 @@ function DigitLab() {
 }
 
 // ---------------------------------------------------------------------------
-// Cat GAN tab: the generator is a wired NAND circuit, not a CNN with weights.
-// A random 96-bit latent is pushed through 2,304 gates and the 1,024 outputs
-// are drawn as a 32x32 image.
+// Cat GAN tab: a generator, not an autoencoder.
 //
-// It is a placeholder. The circuit reproduces cat-image statistics (density,
-// local texture) but not anatomy, and only about 15 of its 96 latent bits
-// change the output, so the grid shows large smooth blobs rather than cats.
-// `effective_latent` in gan/meta.json is that number, measured offline by
-// flipping each latent bit and counting changed outputs.
+// `scripts/sat_ae.py --mode fit --gate nandinv --targets data/quickdraw_cats_32.json`
+// asks kissat for one wiring of a fixed decoder shape whose code p produces
+// Quick Draw cat p. Each gate is NAND or AND (an inversion bit per gate), the
+// same gate class as the glyph generator. Codes with a target are fitted to a
+// per-pattern slack budget; codes after the last target were never shown a
+// drawing and are whatever the same wiring computes.
+//
+// The information budget is the interesting part: a gate has only a handful of
+// bits of wiring freedom, so a 2,000-gate decoder can hold on the order of ten
+// 32x32 drawings, not two hundred. The tab samples uniformly from the code
+// space and reports how many of the 16 tiles came from fitted codes and how
+// far those reconstructions are from their drawings.
 // ---------------------------------------------------------------------------
 
+type GanCode = {
+  code: string;
+  trained: boolean;
+  wrong: number | null;
+  ink: number;
+};
+
 type GanMeta = {
+  kind: string;
   side: number;
   latent: number;
   gates: number;
   depth: number;
-  active_gates: number;
+  trained: number;
+  free: number;
+  slack: number;
+  ber: number;
+  exact: number;
+  worst: number;
   effective_latent: number;
-  dead_latent: number;
+  source: string;
+  codes: GanCode[];
   note: string;
 };
 
@@ -1110,6 +1150,30 @@ const GAN_GRID = 4;
 const GAN_GAP = 2; // transparent gutter between tiles, in source pixels
 const GAN_ON = 232;
 const GAN_OFF = 11;
+
+type CatTrack = {
+  dir: string;
+  title: string;
+  method: "sat" | "grad";
+  fittedLabel: string;
+  errorLabel: string;
+};
+
+const CAT_SAT: CatTrack = {
+  dir: "gan/sat",
+  title: "This cat is a circuit.",
+  method: "sat",
+  fittedLabel: "fitted in grid",
+  errorLabel: "fitted error",
+};
+
+const CAT_GRAD: CatTrack = {
+  dir: "gan/grad",
+  title: "This cat is a guess.",
+  method: "grad",
+  fittedLabel: "known codes",
+  errorLabel: "reconstruction error",
+};
 
 /** Deterministic RNG for the headless self-test: same grid every load. */
 function mulberry32(seed: number): () => number {
@@ -1122,7 +1186,7 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-function CatGan() {
+function CatGan(props: { track: CatTrack }) {
   const params = new URLSearchParams(window.location.search);
   let canvasRef: HTMLCanvasElement | undefined;
   let circuitJson = "";
@@ -1134,21 +1198,32 @@ function CatGan() {
   const [latentHex, setLatentHex] = createSignal("");
   const [density, setDensity] = createSignal(0);
   const [spread, setSpread] = createSignal(0);
+  const [fitted, setFitted] = createSignal(0);
+  const [fittedError, setFittedError] = createSignal(0);
+
+  /** Little-endian code index, matching how sat_ae.py pins each code. */
+  const codeOf = (latent: Uint8Array): number => {
+    let code = 0;
+    for (let i = 0; i < latent.length; i += 1) if (latent[i]) code |= 1 << i;
+    return code;
+  };
 
   const generate = (
     meta: GanMeta,
     rng: () => number = Math.random,
-  ): { density: number; spread: number } | null => {
+  ): { density: number; spread: number; fitted: number; error: number } | null => {
     const canvas = canvasRef;
     if (!canvas || circuitJson === "") return null;
 
     const tiles = GAN_GRID * GAN_GRID;
     const samples: Uint8Array[] = [];
+    const codes: number[] = [];
     let firstLatent = new Uint8Array(meta.latent);
     for (let t = 0; t < tiles; t += 1) {
       const latent = new Uint8Array(meta.latent);
       for (let i = 0; i < latent.length; i += 1) latent[i] = rng() < 0.5 ? 1 : 0;
       if (t === 0) firstLatent = latent;
+      codes.push(codeOf(latent));
       samples.push(run_circuit(circuitJson, latent));
     }
 
@@ -1198,10 +1273,25 @@ function CatGan() {
     }
     const spreadValue = total / pairs;
 
+    // How many of the 16 sampled codes were shown a drawing, and how far the
+    // circuit's output is from that drawing (only fitted codes have a target).
+    let fittedCount = 0;
+    let wrongBits = 0;
+    for (const code of codes) {
+      const entry = meta.codes[code];
+      if (entry?.trained) {
+        fittedCount += 1;
+        wrongBits += entry.wrong ?? 0;
+      }
+    }
+    const errorValue = fittedCount > 0 ? wrongBits / (fittedCount * meta.side * meta.side) : 0;
+
     setLatentHex(bitsToHex(firstLatent));
     setDensity(densityValue);
     setSpread(spreadValue);
-    return { density: densityValue, spread: spreadValue };
+    setFitted(fittedCount);
+    setFittedError(errorValue);
+    return { density: densityValue, spread: spreadValue, fitted: fittedCount, error: errorValue };
   };
 
   /** Buttons run after the scheduler has flushed, so the signal is current. */
@@ -1229,24 +1319,30 @@ function CatGan() {
   onSettled(() => {
     void (async () => {
       try {
+        const metaPath = `${props.track.dir}/meta.json`;
+        const circuitPath = `${props.track.dir}/circuit.json`;
         const [metaJson, circuitText] = await Promise.all([
-          fetchJson<GanMeta>(asset("gan/meta.json")),
-          fetch(asset("gan/circuit.json")).then((response) => {
-            if (!response.ok) throw new Error(`gan/circuit.json: HTTP ${response.status}`);
+          fetchJson<GanMeta>(asset(metaPath)),
+          fetch(asset(circuitPath)).then((response) => {
+            if (!response.ok) throw new Error(`${circuitPath}: HTTP ${response.status}`);
             return response.text();
           }),
         ]);
         await wasmReady;
         circuitJson = circuitText;
         setInfo(metaJson);
+        const gateName = props.track.method === "sat" ? "NAND/AND gates" : "NAND gates";
         setStatus(
-          `ready · ${metaJson.gates.toLocaleString()} NAND gates · ` +
-            `${metaJson.latent}-bit latent · depth ${metaJson.depth}`,
+          `ready · ${metaJson.gates.toLocaleString()} ${gateName} · ` +
+            `${metaJson.latent}-bit key · ${metaJson.trained} fitted of ` +
+            `${2 ** metaJson.latent} codes`,
         );
         if (params.get("selftest") === "1") {
           const stats = generate(metaJson, mulberry32(7));
           setStatus(
-            `self-test · ${metaJson.gates} gates · ` +
+            `self-test · ${props.track.dir} · ${metaJson.gates} gates · ` +
+              `${stats?.fitted ?? 0}/16 fitted · ` +
+              `error ${((stats?.error ?? 0) * 100).toFixed(1)}% · ` +
               `density ${((stats?.density ?? 0) * 100).toFixed(1)}% · ` +
               `spread ${((stats?.spread ?? 0) * 100).toFixed(1)}%`,
           );
@@ -1262,10 +1358,15 @@ function CatGan() {
   return (
     <section class="ganlab">
       <div class="gan-head">
-        <h2>This cat is not real.</h2>
+        <h2>{props.track.title}</h2>
         <p class="hint">
-          2,304 literal NAND gates and 96 random bits. No weights are evaluated to make these images
-          — each tile is one latent, sampled fresh.
+          {info()
+            ? `${info()!.trained} Google Quick Draw cats, one ${info()!.latent}-bit key and ` +
+              `${info()!.gates.toLocaleString()} literal gates. `
+            : ""}
+          {props.track.method === "sat"
+            ? "The wiring was chosen by kissat, not by gradients: each gate is NAND or AND, and every tile is one key pushed through the same circuit."
+            : "The wiring was found by gradient descent through soft NANDs, then snapped back to hard 0/1 gates. Every tile is one key pushed through that decoder; no weights are evaluated."}
         </p>
       </div>
 
@@ -1297,6 +1398,14 @@ function CatGan() {
             <strong>{info()?.depth ?? "–"}</strong>
           </div>
           <div>
+            <span>{props.track.fittedLabel}</span>
+            <strong>{`${fitted()}/16`}</strong>
+          </div>
+          <div>
+            <span>{props.track.errorLabel}</span>
+            <strong>{(fittedError() * 100).toFixed(1)}% bits</strong>
+          </div>
+          <div>
             <span>density</span>
             <strong>{(density() * 100).toFixed(1)}%</strong>
           </div>
@@ -1305,7 +1414,7 @@ function CatGan() {
             <strong>{(spread() * 100).toFixed(1)}%</strong>
           </div>
           <div>
-            <span>live latent bits</span>
+            <span>live key bits</span>
             <strong>{info() ? `${info()!.effective_latent}/${info()!.latent}` : "–"}</strong>
           </div>
         </div>

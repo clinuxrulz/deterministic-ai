@@ -312,7 +312,9 @@ cargo run --release -p xorae -- export \
 | `crates/cli/src/ga.rs` | Genetic algorithm, fitness, evaluation |
 | `crates/cli/src/dataset.rs` | CIFAR loader, planar fix, `XAE4` format, palette/colour modes |
 | `crates/wasm/src/lib.rs` | `wasm-bindgen` bridge |
-| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions`/`subsets`/`generate` modes, `--gate {nand,nandinv,xor3,xor2,mix}`, `--glyphs`/`--slack`/`--letters`/`--distance`/`--anchor`/`--export` |
+| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions`/`subsets`/`generate`/`fit` modes, `--gate {nand,nandinv,xor3,xor2,mix}`, `--glyphs`/`--slack`/`--letters`/`--distance`/`--anchor`/`--targets`/`--free-background`/`--slack-block`/`--export` |\n| `scripts/fetch_quickdraw_cats.py` | Quick Draw `cat` category → binary bitmap JSON + preview contact sheet |\n| `scripts/render_gan.py` | render every code of an exported generator to a PNG, fitted codes boxed |\n| `scripts/make_quickdraw_dataset.py` | JSON → `XAE4` for `train-nand` (gradient track) |\n| `scripts/export_trained_gan.py` | export trained generator circuit → `web/public/gan/grad/` |\n| `configs/quickdraw_grad.toml` | gradient‑only generator config, `generator = true` |\n| `crates/cli/src/nand.rs` | `generator` mode, per-gate `inv`, `relaxation = "min"` |\n| `web/src/App.tsx` | two‑tab CatGan (SAT + gradient) |\n| `web/public/gan/grad/` | exported generator (8‑bit key, nandinv, 2494 gates) |\n| `AGENTS.md` | this file (new scripts + configs) |\n| `docs/experiment.md` | Checkpoint 13 (SAT ceiling) and Checkpoint 14 (gradient fallback) |,
+| `scripts/fetch_quickdraw_cats.py` | Quick Draw `cat` category → binary bitmap JSON + preview contact sheet |
+| `scripts/render_gan.py` | render every code of an exported generator to a PNG, fitted codes boxed |
 | `scripts/circuit_cones.py` | exact dependency cones of every wire: what an output *can* depend on |
 | `scripts/make_glyph_dataset.py` | writes the 8×8 glyphs as `XAE4` so `train-nand` can train on the same data |
 | `web/src/App.tsx` | Solid 2.0 UI |

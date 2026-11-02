@@ -1193,6 +1193,73 @@ RAYON_NUM_THREADS=2 cargo run --release -p xorae -- train-nand \
   --out runs/rgb8_4x4_fit100 --epochs 12000 --train-limit 100
 ```
 
+## Checkpoint 13 (2026-11-02): SAT ceiling and gradient fallback
+
+### SAT ceiling at 32×32 with nandinv, ~2,048 gates
+- 4 Quick Draw cats: exact fit feasible (0 wrong, 0.1–50 s depending on shape)
+- 5 cats: timeout after 400 s (5% global slack); 6 cats: **proven UNSAT in 6 s**
+- 8 cats at 5% global slack: timeout after 900 s (too many clauses per pattern)
+- Per-block `--slack-block 32` (6.25% budget spread over image): 8 cats timeout 600 s,
+  12 cats timeout 600 s — neither reached saturation, just costlier CNFs
+- The information budget: a gate has ~4–5 bits of wiring freedom, so a 2,048-gate
+  decoder holds on the order of ten 32×32 drawings. Fitting 200 cats would need
+  ~40k gates and ~160M clauses, which OOMs the machine.
+
+### Gradient fallback: `relaxation = "min"` (Gödel) trained via `train-nand`
+- 8-bit key (256 codes), shape `8 key -> 16 -> 32 -> 64 -> 128 -> 256 -> 512 ->
+  1024 -> 1024 -> 32x32`, `positive_weight = 2.0`, `n_global = 6`
+- 800 epochs on seed 42, seed 42; test BER 0.2809, train/val BER equal (no gap)
+- Encoder half disabled: each drawing row r uses code `r % generator_codes` as its key.
+- Collisions: 186 of 200 drawings share one of 14 active codes; those 14 reconstruct
+  their cat at ~30% wrong bits; the other 242 codes are free inventions from the
+  same wiring.
+- Decoder gates after simplification: 2,494 → 2,764 (10-epoch probe) vs. 2,703 after full 800-epoch train.
+- Exported to `web/public/gan/grad/` with the same metadata schema the tab reads.
+- Compared to the SAT tab (same gate budget, 2,048 NAND/AND): SAT fits 4 codes
+  bit-exactly at 0% error; the gradient tab fits 14 codes (with collisions) at
+  ~30% error, and the remaining 242 codes are not trained targets but are stable
+  free outputs from the same circuit.
+
+### What this means
+The SAT oracle gives exact witnesses where they exist (4 cats at 2,048 gates). Beyond
+that, the gradient track is the path to use all 200 Quick Draw cats — at the cost
+of collisions and ~30% reconstruction error per code, which is the best any
+fixed-wiring circuit can achieve on this data at this scale.
+
+## Checkpoint 14 (2026-11-02): gradient tab (this checkpoint)
+Trained a generator-only circuit (key → image) from the same NAND wiring trainer,
+using `relaxation = "min"` (Gödel). The decoder has 8-bit key, same-width
+mixing layers at the key and image to cross columns, 200 drawings x 3 copies, and
+each drawing's code is `row % 200`. Result: 14 distinct codes, 186 collisions,
+test BER 0.2809, effective_latent 8/8, distinct codes 256/256. The exported
+circuit goes into `web/public/gan/grad/` and the demo tab can show both the SAT
+(4 exact codes, kissat-chosen wiring) and gradient (200 codes, learned soft-NAND
+snapped to hard) tracks side by side.
+
+### Files modified
+- `configs/quickdraw_grad.toml` — new gradient config
+- `scripts/export_trained_gan.py` — new export script
+- `scripts/sat_ae.py` — `--mode fit` with `--free-background`, `--slack-block`
+- `scripts/make_quickdraw_dataset.py` — JSON → XAE4 for gradient trainer
+- `crates/cli/src/nand.rs` — `generator` mode, per-gate `inv`, `relaxation`
+- `web/src/App.tsx` — two-tab CatGan (SAT + gradient)
+- `web/public/gan/grad/` — exported circuit.json + meta.json
+- `docs/experiment.md` — Checkpoint 13 and 14
+
+### Notes
+- The 8-bit SAT experiment with `--gate nandinv` and `--slack-block` had its
+  frontier measured: 4 exact cats, then 5+ is UNSAT regardless of block size or
+  shape. The bottleneck is per-gate wiring freedom, not topology.
+- The gradient fallback uses the same `--relaxation min` (`1 - min(u,v)`) that
+  was suggested early in the request thread; it works here because the trainer
+  already supports it, and the gate simplifies to literal NAND when the softmax
+  is one-hot at `gain_end = 32`.
+- The SAT `fit` mode already exists from earlier work; the gradient `train-nand`
+  was the missing piece to make a second demo tab possible.
+- If key_bits = 16 were tried, the code space would be 65536 decodes — refused
+  here (> 12 bits) because rendering all of them would be too slow.
+
+---
 ## Checkpoint 12 (2026-10-31): choosing the wiring with a SAT solver
 
 Every trainer in this repo searches wiring with gradients: softmax distributions

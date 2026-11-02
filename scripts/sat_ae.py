@@ -29,10 +29,22 @@ Modes:
                  encoder is wrong, not that the shape is infeasible.
 * ``brute``    - enumerate every wiring of a tiny shape and compare with the
                  solver; the check that rules out an over-constrained encoding
+* ``generate``- build, don't fit: every code must satisfy a hand-written
+                 predicate (see the glyph generator).
+* ``fit``     - decoder only, fitted to real bitmaps: code ``p`` must produce
+                 ``--targets`` drawing ``p`` within ``--slack`` wrong bits, and
+                 the remaining codes are free (optionally with background
+                 forced off, so they are not inversions of a fitted drawing).
 
 Usage::
 
     python3 scripts/sat_ae.py --solver path/to/kissat --patterns 4 --slack 0
+
+    # 6 Quick Draw cats, one code each, 5% slack, free codes kept upright
+    python3 scripts/fetch_quickdraw_cats.py --limit 200 --size 32
+    python3 scripts/sat_ae.py --mode fit --gate nandinv --slack 50 --codes 6 \
+        --spread --free-background --shape 3,16,16,32,64,128,256,512,1024 \
+        --targets data/quickdraw_cats_32.json --export web/public/gan
 """
 
 from __future__ import annotations
@@ -804,6 +816,204 @@ def subset_sweep(sizes: list[int], gate: str, slack: int, solver: str,
     return 0
 
 
+def load_targets(path: Path) -> tuple[int, list[list[int]], list[dict]]:
+    """Read a bitmap set written by ``scripts/fetch_quickdraw_cats.py``."""
+    payload = json.loads(path.read_text())
+    side = int(payload["side"])
+    targets = [[int(b) for b in bits] for bits in payload["targets"]]
+    for bits in targets:
+        if len(bits) != side * side:
+            raise SystemExit(f"{path}: expected {side * side} bits per target, "
+                             f"got {len(bits)}")
+    return side, targets, payload.get("items", [])
+
+
+def fit(solver: str, sizes: list[int], gate: str, targets_path: Path,
+        slack: int, limit: int, free_ink: tuple[float, float] | None,
+        timeout: float, export: Path | None, spread: bool = False,
+        free_background: bool = False, slack_block: int = 0) -> int:
+    """Pin one code per training bitmap; the rest of the code space is free.
+
+    This is the *generator* half of the autoencoder, fitted to real drawings
+    instead of to a hand-written predicate. Code ``p`` is constrained to
+    produce ``targets[p]`` within ``slack`` wrong bits, and codes after the
+    last target are left free (optionally held to an ink range) so the wiring
+    also has to do something sensible with codes nothing asked for.
+    """
+    side, targets, items = load_targets(targets_path)
+    n_out = side * side
+    if sizes[-1] != n_out:
+        raise SystemExit(f"--shape must end in {n_out} for {side}x{side} targets; "
+                         f"got {sizes[-1]}")
+    key_bits = sizes[0]
+    n_codes = 1 << key_bits
+    n_targets = min(len(targets), max(1, limit), n_codes)
+    if spread and n_targets < len(targets):
+        # spread the fitted drawings across the whole selection rather than
+        # taking the first N, which are just the first N lines of the file
+        step = len(targets) / n_targets
+        picks = [int(i * step) for i in range(n_targets)]
+    else:
+        picks = list(range(n_targets))
+    targets = [targets[i] for i in picks]
+    chosen = [items[i] for i in picks if i < len(items)]
+    print(f"{n_targets} {side}x{side} targets, {key_bits}-bit key "
+          f"({n_codes} codes, {n_codes - n_targets} free), "
+          + (f"slack {slack} bits per {slack_block}-bit block "
+             f"(<= {slack * ((n_out + slack_block - 1) // slack_block) / n_out:.1%}), "
+             if slack_block > 0 else
+             f"slack {slack} bits/pattern ({slack / n_out:.1%}), ")
+          + f"gate {gate}")
+
+    cnf = Cnf()
+    net = Net(sizes, gate)
+    # The code space only needs unrolling when the free codes are constrained;
+    # otherwise the CNF carries just the fitted patterns and every other code
+    # is read off the witness afterwards.
+    want_free = free_ink is not None or free_background
+    n_patterns = n_codes if want_free else n_targets
+    net.build(cnf, [[0] * key_bits for _ in range(n_patterns)],
+              [[0] * n_out for _ in range(n_patterns)], 0,
+              constrain_outputs=False, free_inputs=True)
+    for p in range(n_patterns):
+        for b in range(key_bits):
+            var = net.value_vars[0][b][p]
+            cnf.add([var if (p >> b) & 1 else -var])
+
+    outs = net.value_vars[-1]
+    block = slack_block if slack_block > 0 else n_out
+    for p, tgt in enumerate(targets):
+        if slack <= 0:
+            for i, bit in enumerate(tgt):
+                cnf.add([outs[i][p] if bit else -outs[i][p]])
+        else:
+            selectors = []
+            for i, bit in enumerate(tgt):
+                lit = outs[i][p] if bit else -outs[i][p]
+                sel = cnf.var()
+                cnf.add([-sel, -lit])
+                cnf.add([sel, lit])
+                selectors.append(sel)
+            # A global counter over all 1,024 bits costs ~2*n*k clauses per
+            # pattern and lets one region absorb the whole budget. A budget
+            # *per block of pixels* is both far cheaper (k is small) and keeps
+            # the error spread over the image, which is what "a bit of slack"
+            # should look like.
+            for start in range(0, n_out, block):
+                at_most_k(cnf, selectors[start:start + block], slack)
+    if free_ink is not None:
+        lo = int(round(free_ink[0] * n_out))
+        hi = int(round(free_ink[1] * n_out))
+        for p in range(n_targets, n_codes):
+            ink = [outs[i][p] for i in range(n_out)]
+            at_least_k(cnf, ink, lo)
+            at_most_k(cnf, ink, hi)
+    if free_background:
+        # A free code otherwise tends to come back as a *global inversion* of a
+        # fitted drawing: one unused key bit flips a whole subtree, which is
+        # cheap for the solver and useless as a generated cat. Every pixel that
+        # is background in all the fitted drawings is forced to stay
+        # background, which costs one unit clause per pixel and rules the
+        # inversion out without a 1,024-bit cardinality counter for ink.
+        always_off = [i for i in range(n_out) if all(t[i] == 0 for t in targets)]
+        always_on = [i for i in range(n_out) if all(t[i] == 1 for t in targets)]
+        for p in range(n_targets, n_codes):
+            for i in always_off:
+                cnf.add([-outs[i][p]])
+            for i in always_on:
+                cnf.add([outs[i][p]])
+        print(f"free codes: {len(always_off)} pixels forced off, "
+              f"{len(always_on)} forced on")
+
+    print(f"cnf: {cnf.n} vars, {len(cnf.clauses)} clauses")
+    workdir = Path(tempfile.mkdtemp(prefix="sat_ae_"))
+    status, elapsed, model = run(solver, cnf, timeout, workdir)
+    print(f"result: {status} in {elapsed:.1f}s")
+    if status != "sat" or model is None:
+        return 0
+
+    images = []
+    for p in range(n_codes):
+        code = [(p >> b) & 1 for b in range(key_bits)]
+        images.append(simulate(net, model, code))
+    wrong = [sum(a != b for a, b in zip(images[p], targets[p]))
+             for p in range(n_targets)]
+    total = sum(wrong)
+    print(f"ber {total / (n_targets * n_out):.4f}, exact "
+          f"{sum(w == 0 for w in wrong)}/{n_targets}, "
+          f"worst {max(wrong)}/{n_out}")
+    inks = [sum(img) / n_out for img in images]
+    print(f"ink {min(inks):.3f}-{max(inks):.3f} over all {n_codes} codes")
+    distinct = len({tuple(img) for img in images})
+    eff = 0
+    for b in range(key_bits):
+        if any(images[p ^ (1 << b)] != images[p] for p in range(n_codes)):
+            eff += 1
+    print(f"distinct codes {distinct}/{n_codes}, live latent bits {eff}/{key_bits}")
+    over = [p for p, w in enumerate(wrong) if w > slack]
+    if over:
+        print(f"BOUND VIOLATED for {len(over)} patterns (worst {max(wrong)})")
+        return 1
+
+    if export is not None:
+        wiring = []
+        for g in net.gates:
+            choice = (read_index(model, g["a_bits"]), read_index(model, g["b_bits"]))
+            if net.op == "nandinv":
+                choice += (1 if model.get(g["inv"], False) else 0,)
+            wiring.append(choice)
+        decoder = circuit_json(net, wiring, 0, len(sizes) - 1)
+        for p in range(n_codes):
+            code = [(p >> b) & 1 for b in range(key_bits)]
+            if eval_circuit(decoder, code) != images[p]:
+                print(f"EXPORT BROKEN: code {p} differs after serialisation")
+                return 1
+        export.mkdir(parents=True, exist_ok=True)
+        (export / "circuit.json").write_text(
+            json.dumps(decoder, separators=(",", ":")))
+        meta = {
+            "kind": "quickdraw cat generator",
+            "gate": gate,
+            "shape": "-".join(map(str, sizes)),
+            "side": side,
+            "latent": key_bits,
+            "outputs": n_out,
+            "gates": len(decoder["gates"]),
+            "depth": len(sizes) - 1,
+            "trained": n_targets,
+            "free": n_codes - n_targets,
+            "slack": slack,
+            "ber": round(total / (n_targets * n_out), 4),
+            "exact": sum(w == 0 for w in wrong),
+            "worst": max(wrong),
+            "distinct": distinct,
+            "effective_latent": eff,
+            "source": targets_path.name,
+            "source_items": chosen,
+            "solver": solver.rsplit("/", 1)[-1],
+            "seconds": round(elapsed, 2),
+            "codes": [{"code": "".join(str((p >> b) & 1) for b in range(key_bits)),
+                       "trained": p < n_targets,
+                       "wrong": wrong[p] if p < n_targets else None,
+                       "ink": round(sum(images[p]) / n_out, 3)}
+                      for p in range(n_codes)],
+            "note": (
+                f"kissat chose one wiring for {n_targets} of the {len(items)} "
+                f"Quick Draw cats in {targets_path.name}; every gate is NAND or "
+                f"AND. Codes 0-{n_targets - 1} are those drawings, fitted to "
+                f"within {slack} wrong bits each; the other {n_codes - n_targets} "
+                f"codes were never shown a target and are whatever the same "
+                f"wiring computes. A gate has only a handful of bits of wiring "
+                f"freedom, so {len(decoder['gates'])} gates hold a few 32x32 "
+                f"drawings, not two hundred -- the rest of the code space is "
+                f"extrapolation, not retrieval."
+            ),
+        }
+        (export / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+        print(f"exported {len(decoder['gates'])} gates to {export}")
+    return 0
+
+
 def generate(solver: str, sizes: list[int], timeout: float, gate: str,
              min_ink: float, max_ink: float, anchor: int, n_letters: int,
              min_distance: int, export: Path | None) -> int:
@@ -1119,7 +1329,7 @@ def main() -> int:
     parser.add_argument("--slack", type=int, default=0,
                         help="maximum wrong output bits per pattern")
     parser.add_argument("--mode", choices=["full", "encoder", "decoder", "selftest", "brute",
-                                          "functions", "subsets", "generate"],
+                                          "functions", "subsets", "generate", "fit"],
                         default="full")
     parser.add_argument("--gate", choices=["nand", "nandinv", "xor3", "xor2", "mix"], default="nand",
                         help="nand = NAND(a,b); xor3 = XOR(a,b) plus a SAT-chosen "
@@ -1147,6 +1357,26 @@ def main() -> int:
                         help="--mode generate: each image must be within this "
                              "many bits of some glyph (0 = no anchor)")
     parser.add_argument("--keep", help="copy the CNF here for inspection")
+    parser.add_argument("--targets", metavar="FILE",
+                        help="--mode fit: bitmap JSON from "
+                             "scripts/fetch_quickdraw_cats.py")
+    parser.add_argument("--codes", type=int, default=0,
+                        help="--mode fit: pin at most this many targets (0 = all)")
+    parser.add_argument("--free-ink", metavar="LO,HI",
+                        help="--mode fit: ink range for codes with no target, "
+                             "e.g. 0.10,0.30 (default: unconstrained)")
+    parser.add_argument("--spread", action="store_true",
+                        help="--mode fit: pick the pinned targets evenly across "
+                             "the file instead of the first --codes of them")
+    parser.add_argument("--free-background", action="store_true",
+                        help="--mode fit: force pixels that are background in "
+                             "every fitted target to stay background on the "
+                             "free codes, which rules out inverted copies")
+    parser.add_argument("--slack-block", type=int, default=0, metavar="BITS",
+                        help="--mode fit: apply --slack per block of BITS output "
+                             "pixels instead of per pattern (e.g. --slack 2 "
+                             "--slack-block 32 = at most 6.25%% wrong, spread "
+                             "over the image, and a much smaller CNF)")
     parser.add_argument("--export", metavar="DIR",
                         help="write the witness as browser circuits + meta.json")
     parser.add_argument("--csv", action="store_true", help="one machine-readable line")
@@ -1176,6 +1406,18 @@ def main() -> int:
         return generate(args.solver, sizes, args.timeout, args.gate,
                         args.min_ink, args.max_ink, args.anchor, args.letters,
                         args.distance, Path(args.export) if args.export else None)
+    if args.mode == "fit":
+        if not args.targets:
+            print("--mode fit needs --targets FILE")
+            return 1
+        free_ink = None
+        if args.free_ink:
+            lo, hi = (float(x) for x in args.free_ink.split(","))
+            free_ink = (lo, hi)
+        return fit(args.solver, sizes, args.gate, Path(args.targets), args.slack,
+                   args.codes, free_ink, args.timeout,
+                   Path(args.export) if args.export else None, args.spread,
+                   args.free_background, args.slack_block)
 
     names = list(args.glyphs) if args.glyphs else list(GLYPHS)[: args.patterns]
     unknown = [n for n in names if n not in GLYPHS]

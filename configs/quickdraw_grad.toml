@@ -1,0 +1,51 @@
+# Gradient-track cat generator: the same 200 Quick Draw cats as the SAT tab,
+# trained the other way.
+#
+# `generator = true` trains ONLY the decoder. Row r of the dataset is drawing
+# `r % generator_codes`, and that index is the key it must be reproduced from.
+# There is no encoder to collapse, so all 200 codes are used, exactly as the
+# SAT `fit` mode pins one code per drawing.
+#
+# Decoder shape: 8-bit key -> 16 -> 32 -> 64 -> 128 -> 256 -> 512 -> 1024 ->
+# 1024 -> 32x32. The same-width layers at the key and at the image are the
+# only mechanism that mixes across columns (see "What the wiring can and
+# cannot express" in AGENTS.md).
+#
+# `relaxation = "min"` is the form the request named: every gate is the Gödel
+# relaxation z = 1 - min(u, v), then snapped back to a literal NAND.
+image_size = 32
+key_bits = 8
+hidden = [1024, 512, 256, 128, 64, 32, 16]
+
+generator = true
+generator_codes = 200
+
+# 200 drawings x 3 training copies + 200 test copies = 800 rows.
+epochs = 800
+batch = 64
+lr = 0.01
+
+# Quick Draw cats are ~20% ink; lift the strokes so a mean image is not
+# already the best available answer.
+positive_weight = 2.0
+
+n_local = 9
+n_global = 6
+skip_prob = 0.30
+
+binarize_weight = 0.02
+key_balance_weight = 0.0
+
+gain_start = 1.0
+gain_end = 32.0
+anneal_fraction = 0.85
+
+# Greedy wiring polish scores an autoencoder (encode then decode); a generator
+# has no encoder half, so it is disabled here.
+polish_sweeps = 0
+
+relaxation = "min"
+
+seed = 42
+log_every = 20
+val_every = 50

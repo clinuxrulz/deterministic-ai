@@ -125,6 +125,15 @@ pub struct NandConfig {
     /// Continuous relaxation used for the NAND gate.
     #[serde(default)]
     pub relaxation: Relaxation,
+    /// Train only the decoder (a generator). The input is a fixed code per
+    /// drawing -- row `r` uses code `r % generator_codes` -- and the target is
+    /// the drawing itself. `hidden` is then the decoder's widths from the key
+    /// outward, and `key_bits` must be large enough for `generator_codes`.
+    #[serde(default)]
+    pub generator: bool,
+    /// Number of distinct drawings in generator mode; also the code period.
+    #[serde(default)]
+    pub generator_codes: usize,
     pub seed: u64,
     #[serde(default = "default_log_every")]
     pub log_every: usize,
@@ -206,6 +215,18 @@ impl NandConfig {
             (0.0..=1.0).contains(&self.skip_prob),
             "skip_prob must be in 0..=1"
         );
+        if self.generator {
+            anyhow::ensure!(
+                self.generator_codes > 0,
+                "generator mode needs generator_codes > 0"
+            );
+            anyhow::ensure!(
+                self.generator_codes <= (1usize << self.key_bits),
+                "generator_codes {} does not fit in {} key bits",
+                self.generator_codes,
+                self.key_bits
+            );
+        }
         Ok(())
     }
 
@@ -238,13 +259,52 @@ impl Net {
     fn build(cfg: &NandConfig, rng: &mut impl Rng) -> Result<Self> {
         let side = cfg.image_size;
         let n_inputs = side * side * cfg.channels.max(1);
+        let initial = (side * cfg.channels.max(1), side);
+        let k = cfg.k();
+
+        if cfg.generator {
+            // Generator mode: only the decoder half exists, and its input is
+            // the key. Derive the shapes from the image side (then reverse
+            // them) so the output really is 32x32 and local windows are 2-D;
+            // growing a 1x8 key strip would stay a strip all the way out.
+            let mut enc_sizes = vec![n_inputs];
+            enc_sizes.extend(cfg.hidden.iter().copied());
+            enc_sizes.push(cfg.key_bits);
+            let mut shapes = derive_shapes_from(initial, &enc_sizes)?;
+            shapes.reverse();
+            let mut sizes = enc_sizes;
+            sizes.reverse();
+
+            let mut layers = Vec::new();
+            let mut gate_off = 0usize;
+            for i in 0..sizes.len() - 1 {
+                let out_shape = shapes[i + 1];
+                let readable: Vec<(usize, (usize, usize))> =
+                    (0..=i).map(|t| (t, shapes[t])).collect();
+                let (cand_layer, cand_idx) = wire_candidates(rng, out_shape, &readable, cfg);
+                layers.push(Layer {
+                    n_out: sizes[i + 1],
+                    cand_layer,
+                    cand_idx,
+                    gate_off,
+                });
+                gate_off += sizes[i + 1];
+            }
+            return Ok(Self {
+                layers,
+                n_inputs: cfg.key_bits,
+                key_bits: cfg.key_bits,
+                enc_layers: 0,
+                n_gates: gate_off,
+                k,
+            });
+        }
+
         let mut sizes = vec![n_inputs];
         sizes.extend(cfg.hidden.iter().copied());
         sizes.push(cfg.key_bits);
         // Planar colour data stacks into a tall image: 3 planes of side x side.
-        let initial = (side * cfg.channels.max(1), side);
         let shapes = derive_shapes_from(initial, &sizes)?;
-        let k = cfg.k();
 
         let mut layers = Vec::new();
         let mut gate_off = 0usize;
@@ -681,7 +741,7 @@ impl Work {
         }
 
         let kbw = self.key_balance_weight;
-        if kbw > 0.0 {
+        if kbw > 0.0 && net.enc_layers > 0 {
             let enc_last = net.enc_layers - 1;
             let n = net.key_bits;
             let dz = &mut self.dz[enc_last];
@@ -830,6 +890,53 @@ fn build_circuit(net: &Net, alpha: &[f32], beta: &[f32]) -> (Circuit, Circuit) {
         &wire_b,
     );
     (encoder, decoder)
+}
+
+fn build_generator_circuit(net: &Net, alpha: &[f32], beta: &[f32]) -> Circuit {
+    let k = net.k;
+    let mut wire_a = vec![0usize; net.n_gates];
+    let mut wire_b = vec![0usize; net.n_gates];
+    for g in 0..net.n_gates {
+        wire_a[g] = argmax(&alpha[g * k..(g + 1) * k]);
+        wire_b[g] = argmax(&beta[g * k..(g + 1) * k]);
+    }
+    assemble(&net.layers, 0, net.n_inputs, &wire_a, &wire_b)
+}
+
+/// BER of a key -> image circuit on codes `0..n_codes`, compared with the
+/// first copy of every drawing in the dataset (codes are little-endian).
+fn generator_ber(
+    circuit: &Circuit,
+    dataset: &Dataset,
+    train_pool: &[usize],
+    n_codes: usize,
+    key_bits: usize,
+) -> Result<f32> {
+    let n = n_codes.min(train_pool.len());
+    if n == 0 {
+        bail!("no training samples to score the generator against");
+    }
+    let image_batch = BitBatch::from_matrix(&dataset.bits, &train_pool[..n]);
+    let words = image_batch.words;
+    let mut planes = vec![0u64; key_bits * words];
+    for code in 0..n {
+        for b in 0..key_bits {
+            if (code >> b) & 1 == 1 {
+                planes[b * words + code / 64] |= 1u64 << (code % 64);
+            }
+        }
+    }
+    let mut arena = Vec::new();
+    let mut recon = Vec::new();
+    circuit.eval_into(&planes, words, &mut arena, &mut recon);
+    let errors = plane_hamming(
+        &recon,
+        &image_batch.planes,
+        image_batch.cols,
+        words,
+        n,
+    );
+    Ok(errors as f32 / (n * image_batch.cols).max(1) as f32)
 }
 
 /// Options for lossy gate removal.
@@ -1292,6 +1399,14 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
             cfg.channels
         );
     }
+    let n_cats = if cfg.generator {
+        if cfg.generator_codes == 0 {
+            bail!("generator mode needs generator_codes > 0");
+        }
+        cfg.generator_codes
+    } else {
+        0
+    };
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating run directory {}", out_dir.display()))?;
@@ -1315,10 +1430,21 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
 
     let net = Net::build(cfg, &mut rng)?;
     let n_gates = net.n_gates;
-    eprintln!(
-        "nand net: {cols} -> {:?} -> {} key bits -> {:?} -> {cols} ({} NAND gates, {} candidates/gate)",
-        cfg.hidden, cfg.key_bits, cfg.hidden, n_gates, cfg.k()
-    );
+    if cfg.generator {
+        eprintln!(
+            "generator net: {} key bits -> {:?} -> {cols} ({} NAND gates, {} candidates/gate, {} codes)",
+            cfg.key_bits,
+            cfg.hidden,
+            n_gates,
+            cfg.k(),
+            n_cats
+        );
+    } else {
+        eprintln!(
+            "nand net: {cols} -> {:?} -> {} key bits -> {:?} -> {cols} ({} NAND gates, {} candidates/gate)",
+            cfg.hidden, cfg.key_bits, cfg.hidden, n_gates, cfg.k()
+        );
+    }
 
     let mut trainer = Trainer::new(net, cfg, &mut rng);
     let mut adam_a = Adam::new(n_gates * cfg.k(), cfg.lr);
@@ -1369,6 +1495,7 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
     let batches_per_epoch = train_pool.len() / batch;
     let mut input = vec![0f32; cols * batch];
     let mut target = vec![0f32; cols * batch];
+    let mut gen_input = vec![0f32; trainer.net.n_inputs * batch];
 
     let started = std::time::Instant::now();
     let mut step = 0usize;
@@ -1391,12 +1518,24 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
                     input[c * batch + s] = v;
                     target[c * batch + s] = v;
                 }
+                if cfg.generator {
+                    // Fixed code per drawing: row r is cat r % n_cats, so the
+                    // three training copies of a cat share one key.
+                    let cat = row % n_cats;
+                    for b in 0..trainer.net.n_inputs {
+                        gen_input[b * batch + s] = ((cat >> b) & 1) as f32;
+                    }
+                }
             }
             trainer.refresh_probs();
+            let feed: &[f32] = if cfg.generator { &gen_input } else { &input };
+            let generator = cfg.generator;
             pool.par_iter_mut().for_each(|w| {
-                w.forward(&trainer.net, &trainer.probs_a, &trainer.probs_b, &input);
+                w.forward(&trainer.net, &trainer.probs_a, &trainer.probs_b, feed);
                 w.loss(&trainer.net, &target, trainer.binarize_weight, batch);
-                w.accumulate_key(&trainer.net);
+                if !generator {
+                    w.accumulate_key(&trainer.net);
+                }
             });
             key_totals.fill(0.0);
             for w in &pool {
@@ -1449,19 +1588,29 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
             log.flush()?;
         }
         if cfg.val_every > 0 && (epoch % cfg.val_every == 0 || epoch + 1 == cfg.epochs) {
-            let (encoder, decoder) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
-            let model = make_model(dataset, cfg, encoder, decoder);
-            if let Ok(report) = crate::ga::evaluate_model(&model, dataset, &val_pool) {
-                let improved = report.ber + 1e-9 < best_val;
+            let ber = if cfg.generator {
+                let circuit =
+                    build_generator_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
+                generator_ber(&circuit, dataset, &train_pool, n_cats, cfg.key_bits).ok()
+            } else {
+                let (encoder, decoder) =
+                    build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
+                let model = make_model(dataset, cfg, encoder, decoder);
+                crate::ga::evaluate_model(&model, dataset, &val_pool)
+                    .ok()
+                    .map(|report| report.ber)
+            };
+            if let Some(ber) = ber {
+                let improved = ber + 1e-9 < best_val;
                 eprintln!(
                     "epoch {epoch}: train MSE {:.5}, gain {:.1}, val BER {:.4}{}",
                     mean,
                     trainer.gain,
-                    report.ber,
+                    ber,
                     if improved { " (new best)" } else { "" }
                 );
                 if improved {
-                    best_val = report.ber;
+                    best_val = ber;
                     best_snapshot = Some((trainer.alpha.clone(), trainer.beta.clone(), epoch));
                 }
             }
@@ -1474,6 +1623,52 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
         trainer.beta = beta;
         trainer.refresh_probs();
         eprintln!("restored best-val checkpoint from epoch {epoch} (val BER {best_val:.4})");
+    }
+
+    if cfg.generator {
+        // Generator mode: the exported circuit is the whole net, key -> image.
+        let mut generator = build_generator_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
+        let before = generator.gates.len();
+        let (simple, stats) = generator.simplify();
+        generator = simple;
+        eprintln!(
+            "simplified: {before} -> {} gates ({} removed; const {}, identity {}, deduped {}, dead {})",
+            generator.gates.len(),
+            before - generator.gates.len(),
+            stats.folded_const,
+            stats.folded_identity,
+            stats.deduped,
+            stats.dead
+        );
+        let ber = generator_ber(&generator, dataset, &train_pool, n_cats, cfg.key_bits)?;
+        let active = generator.active_gates();
+        // The model format still expects an encoder. In generator mode the
+        // encoder is a pass-through of the first `key_bits` input pixels; it is
+        // never used, because the demo reads `decoder` (key -> image) directly.
+        let dummy = Circuit {
+            n_inputs: cols as u16,
+            gates: Vec::new(),
+            outputs: (0..cfg.key_bits).map(|i| i as u16).collect(),
+        };
+        let mut model = make_model(dataset, cfg, dummy, generator);
+        model.metrics.train_ber = ber;
+        model.metrics.val_ber = ber;
+        model.metrics.test_ber = ber;
+        model.metrics.active_gates = active;
+        std::fs::write(
+            out_dir.join("model.json"),
+            model.to_json().map_err(anyhow::Error::msg)?,
+        )?;
+        std::fs::write(
+            out_dir.join("metrics.json"),
+            serde_json::to_string_pretty(&model.metrics)?,
+        )?;
+        eprintln!(
+            "done: generator BER {:.4} over {n_cats} codes, active gates {active} / {} trained",
+            ber,
+            before
+        );
+        return Ok(model);
     }
 
     let (mut encoder, mut decoder) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
