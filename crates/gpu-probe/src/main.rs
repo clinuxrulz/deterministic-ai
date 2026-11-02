@@ -14,8 +14,7 @@ fn load_entry() -> Result<ash::Entry> {
     //   XORAE_VULKAN_LIB=/system/lib64/libvulkan.so gpu-probe
     if let Ok(path) = std::env::var("XORAE_VULKAN_LIB") {
         println!("loader: {path} (forced)");
-        return unsafe { ash::Entry::load_from(&path) }
-            .map_err(|e| anyhow!("loading {path}: {e}"));
+        return unsafe { ash::Entry::load_from(&path) }.map_err(|e| anyhow!("loading {path}: {e}"));
     }
     // Android/Termux exposes the loader as `libvulkan.so`; desktop as `.so.1`.
     let candidates = [
@@ -34,7 +33,10 @@ fn load_entry() -> Result<ash::Entry> {
             Err(e) => errors.push(format!("{path}: {e}")),
         }
     }
-    Err(anyhow!("no Vulkan loader found:\n  {}", errors.join("\n  ")))
+    Err(anyhow!(
+        "no Vulkan loader found:\n  {}",
+        errors.join("\n  ")
+    ))
 }
 
 fn main() -> Result<()> {
@@ -53,11 +55,11 @@ fn main() -> Result<()> {
         .application_name(c"xorae-gpu-probe")
         .api_version(vk::make_api_version(0, 1, 0, 0));
     let create = vk::InstanceCreateInfo::default().application_info(&app);
-    let instance = unsafe { entry.create_instance(&create, None) }
-        .context("creating a Vulkan instance")?;
+    let instance =
+        unsafe { entry.create_instance(&create, None) }.context("creating a Vulkan instance")?;
 
-    let devices = unsafe { instance.enumerate_physical_devices() }
-        .context("enumerating physical devices")?;
+    let devices =
+        unsafe { instance.enumerate_physical_devices() }.context("enumerating physical devices")?;
     if devices.is_empty() {
         println!("no Vulkan devices");
         return Ok(());

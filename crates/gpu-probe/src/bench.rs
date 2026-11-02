@@ -53,7 +53,10 @@ impl Gpu {
             .application_name(c"xorae-gpu-probe")
             .api_version(vk::make_api_version(0, 1, 0, 0));
         let instance = unsafe {
-            entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None)
+            entry.create_instance(
+                &vk::InstanceCreateInfo::default().application_info(&app),
+                None,
+            )
         }
         .context("creating instance")?;
         let devices = unsafe { instance.enumerate_physical_devices() }?;
@@ -147,7 +150,10 @@ impl Gpu {
             )
         }?;
         let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
-        let props = unsafe { self.instance.get_physical_device_memory_properties(self.physical) };
+        let props = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self.physical)
+        };
         let index = (0..props.memory_type_count)
             .find(|&i| {
                 let flags = props.memory_types[i as usize].property_flags;
@@ -198,10 +204,8 @@ fn pipeline(
     set_layout: vk::DescriptorSetLayout,
 ) -> Result<vk::Pipeline> {
     let module = unsafe {
-        gpu.device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::default().code(spv),
-            None,
-        )
+        gpu.device
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(spv), None)
     }?;
     let entry_name = std::ffi::CString::new(entry)?;
     let stage = vk::PipelineShaderStageCreateInfo::default()
@@ -228,7 +232,10 @@ fn pipeline(
 
 /// Run `iterations` dispatches of a pre-recorded command buffer.
 fn time_dispatches(gpu: &Gpu, cmd: vk::CommandBuffer, iterations: usize) -> Result<f64> {
-    let fence = unsafe { gpu.device.create_fence(&vk::FenceCreateInfo::default(), None) }?;
+    let fence = unsafe {
+        gpu.device
+            .create_fence(&vk::FenceCreateInfo::default(), None)
+    }?;
     let cmds = [cmd];
     let submit = vk::SubmitInfo::default().command_buffers(&cmds);
     // Warm-up.
@@ -256,7 +263,12 @@ fn setup(
     entry: &str,
     buffers: &[vk::Buffer],
     groups: u32,
-) -> Result<(vk::CommandBuffer, vk::Pipeline, vk::DescriptorSetLayout, vk::PipelineLayout)> {
+) -> Result<(
+    vk::CommandBuffer,
+    vk::Pipeline,
+    vk::DescriptorSetLayout,
+    vk::PipelineLayout,
+)> {
     let bindings: Vec<_> = (0..buffers.len())
         .map(|i| {
             vk::DescriptorSetLayoutBinding::default()

@@ -298,7 +298,11 @@ mod tests {
         // ink at all; it must be clamped to the diagonal, not reported as 1e9.
         let cap = SIDE as f32 * std::f32::consts::SQRT_2;
         let d = distance_to_ink(&blank(), SIDE);
-        assert!(d.iter().all(|v| (*v - cap).abs() < 1e-3), "unclamped {:?}", d[0]);
+        assert!(
+            d.iter().all(|v| (*v - cap).abs() < 1e-3),
+            "unclamped {:?}",
+            d[0]
+        );
         let s = scores(&vertical_line(16), &blank(), SIDE);
         assert!((s.chamfer - cap).abs() < 1e-3, "chamfer {}", s.chamfer);
         assert!(s.chamfer < 100.0, "chamfer {} is not in pixels", s.chamfer);

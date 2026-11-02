@@ -288,7 +288,12 @@ impl Circuit {
             let a = rng.gen_index(wire) as u16;
             let b = rng.gen_index(wire) as u16;
             let op = gate_set.op_from_roll(rng.next_f32());
-            gates.push(Gate { op, a, b, inv: false });
+            gates.push(Gate {
+                op,
+                a,
+                b,
+                inv: false,
+            });
         }
 
         let total = n_inputs + 2 + n_gates;
@@ -354,7 +359,12 @@ impl Circuit {
             let b = map[gate.b as usize];
             debug_assert!(a != u16::MAX && b != u16::MAX);
             map[wire] = self.n_inputs + 2 + gates.len() as u16;
-            gates.push(Gate { op: gate.op, a, b, inv: gate.inv });
+            gates.push(Gate {
+                op: gate.op,
+                a,
+                b,
+                inv: gate.inv,
+            });
         }
         let outputs = self
             .outputs
@@ -678,7 +688,15 @@ impl Interner {
             Op::Not => Self::INV,
             Op::Nandinv => 7,
         };
-        self.push((tag, lo, hi), Gate { op, a: lo, b: hi, inv: false })
+        self.push(
+            (tag, lo, hi),
+            Gate {
+                op,
+                a: lo,
+                b: hi,
+                inv: false,
+            },
+        )
     }
 }
 
