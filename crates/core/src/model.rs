@@ -332,6 +332,7 @@ mod tests {
                 op: Op::Xor,
                 a: 0,
                 b: 1,
+                inv: false,
             }],
             outputs: vec![6],
         };

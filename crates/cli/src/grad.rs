@@ -920,6 +920,7 @@ fn assemble(layers: &[Layer], group_start: usize, n_inputs: usize, chosen: &[usi
                 op: OPS[chosen[g]],
                 a: wire(layer.a_src[j], layer.a_idx[j]),
                 b: wire(layer.b_src[j], layer.b_idx[j]),
+                inv: false,
             });
         }
     }
@@ -1214,7 +1215,7 @@ mod tests {
         for (k, op) in OPS.iter().enumerate() {
             for &a in &[0.0f32, 1.0] {
                 for &b in &[0.0f32, 1.0] {
-                    let hard = (op.apply(a as u64, b as u64) & 1) as f32;
+                    let hard = (op.apply(a as u64, b as u64, false) & 1) as f32;
                     assert!(
                         (soft_op(k, a, b) - hard).abs() < 1e-6,
                         "op {k} on ({a},{b})"

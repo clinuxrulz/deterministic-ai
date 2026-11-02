@@ -132,7 +132,9 @@ impl Drop for Gpu {
 /// A host-visible storage buffer plus its mapped pointer.
 struct Buf {
     buffer: vk::Buffer,
+    #[allow(unused)]
     memory: vk::DeviceMemory,
+    #[allow(unused)]
     len: usize,
     ptr: *mut u8,
 }

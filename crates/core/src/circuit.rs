@@ -737,16 +737,16 @@ mod tests {
 
     #[test]
     fn xor_gate_truth_tables() {
-        assert_eq!(Op::Xor.apply(0, 0), 0);
-        assert_eq!(Op::Xor.apply(0, 1), 1);
-        assert_eq!(Op::Xor.apply(1, 0), 1);
-        assert_eq!(Op::Xor.apply(1, 1), 0);
-        assert_eq!(Op::And.apply(1, 1), 1);
-        assert_eq!(Op::Nand.apply(1, 1) & 1, 0);
-        assert_eq!(Op::Nand.apply(1, 0) & 1, 1);
-        assert_eq!(Op::Nor.apply(0, 0) & 1, 1);
-        assert_eq!(Op::Nor.apply(0, 1) & 1, 0);
-        assert_eq!(Op::Not.apply(0, 0), u64::MAX);
+        assert_eq!(Op::Xor.apply(0, 0, false), 0);
+        assert_eq!(Op::Xor.apply(0, 1, false), 1);
+        assert_eq!(Op::Xor.apply(1, 0, false), 1);
+        assert_eq!(Op::Xor.apply(1, 1, false), 0);
+        assert_eq!(Op::And.apply(1, 1, false), 1);
+        assert_eq!(Op::Nand.apply(1, 1, false) & 1, 0);
+        assert_eq!(Op::Nand.apply(1, 0, false) & 1, 1);
+        assert_eq!(Op::Nor.apply(0, 0, false) & 1, 1);
+        assert_eq!(Op::Nor.apply(0, 1, false) & 1, 0);
+        assert_eq!(Op::Not.apply(0, 0, false), u64::MAX);
     }
 
     #[test]
@@ -758,6 +758,7 @@ mod tests {
                 op: Op::Xor,
                 a: 1,
                 b: 3, // constant 1
+                inv: false,
             }],
             outputs: vec![0, 4],
         };
@@ -805,11 +806,13 @@ mod tests {
                     op: Op::Xor,
                     a: 0,
                     b: 1,
+                    inv: false,
                 },
                 Gate {
                     op: Op::Nand,
                     a: 0,
                     b: 1,
+                    inv: false,
                 },
             ],
             outputs: vec![5, 2],
@@ -846,6 +849,7 @@ mod tests {
                 op: Op::Xor,
                 a: 5,
                 b: 0,
+                inv: false,
             }],
             outputs: vec![2],
         };
@@ -885,46 +889,55 @@ mod tests {
                     op: Op::Nand,
                     a: 0,
                     b: 0,
+                    inv: false,
                 }, // 5: NOT x0
                 Gate {
                     op: Op::Nand,
                     a: 0,
                     b: 0,
+                    inv: false,
                 }, // 6: duplicate of 5
                 Gate {
                     op: Op::Nand,
                     a: 1,
                     b: 1,
+                    inv: false,
                 }, // 7: NOT x1
                 Gate {
                     op: Op::Nand,
                     a: 5,
                     b: 7,
+                    inv: false,
                 }, // 8: NAND(NOT x0, NOT x1)
                 Gate {
                     op: Op::Nand,
                     a: 8,
                     b: 8,
+                    inv: false,
                 }, // 9: NOT 8
                 Gate {
                     op: Op::Nand,
                     a: 8,
                     b: 8,
+                    inv: false,
                 }, // 10: duplicate of 9
                 Gate {
                     op: Op::Nand,
                     a: 3,
                     b: 2,
+                    inv: false,
                 }, // 11: NAND(0, x2) = 1 (dead)
                 Gate {
                     op: Op::Nand,
                     a: 2,
                     b: 3,
+                    inv: false,
                 }, // 12: unused
                 Gate {
                     op: Op::Nand,
                     a: 2,
                     b: 4,
+                    inv: false,
                 }, // 13: NOT x2 (const-1 input)
             ],
             outputs: vec![9, 13, 5],
@@ -949,11 +962,13 @@ mod tests {
                     op: Op::Nand,
                     a: 0,
                     b: 2,
+                    inv: false,
                 }, // const 0 wire -> 1
                 Gate {
                     op: Op::Nand,
                     a: 3,
                     b: 3,
+                    inv: false,
                 }, // NAND(1, 1) -> 0
             ],
             outputs: vec![4, 5],
@@ -1007,11 +1022,13 @@ mod tests {
                     op: Op::Nand,
                     a: 0,
                     b: 0,
+                    inv: false,
                 }, // inverter
                 Gate {
                     op: Op::Nand,
                     a: 0,
                     b: 1,
+                    inv: false,
                 }, // real node
             ],
             outputs: vec![4, 5],

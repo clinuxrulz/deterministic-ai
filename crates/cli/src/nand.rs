@@ -1082,6 +1082,7 @@ fn assemble(
                 op: Op::Nand,
                 a: wire(wire_a[g]),
                 b: wire(wire_b[g]),
+                inv: false,
             });
         }
     }

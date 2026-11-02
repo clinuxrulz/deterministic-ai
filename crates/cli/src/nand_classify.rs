@@ -468,6 +468,7 @@ fn materialise(net: &Net, alpha: &[f32], beta: &[f32]) -> Circuit {
             op: Op::Nand,
             a: wire(layer_a, net.cand_idx[g * net.k + ca] as usize),
             b: wire(layer_b, net.cand_idx[g * net.k + cb] as usize),
+            inv: false,
         });
     }
     let last_off = net.layer_off[net.layer_off.len() - 2];
