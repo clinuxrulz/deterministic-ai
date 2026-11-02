@@ -83,7 +83,7 @@ function runImage(image: HTMLImageElement, model: ModelHandle): InferenceResult 
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
-  type Tab = "reconstruct" | "digits" | "gansat" | "gangrad" | "glyphs" | "sat";
+  type Tab = "reconstruct" | "digits" | "gansat" | "gangrad" | "gancnn" | "glyphs" | "sat";
   const initialTab = (value: string | null): Tab => {
     switch (value) {
       case "digits":
@@ -93,6 +93,9 @@ export default function App() {
         return "gansat";
       case "gangrad":
         return "gangrad";
+      case "cnn":
+      case "gancnn":
+        return "gancnn";
       case "glyphs":
         return "glyphs";
       case "sat":
@@ -379,6 +382,12 @@ export default function App() {
           cat gan · grad
         </button>
         <button
+          class={tab() === "gancnn" ? "tab active" : "tab"}
+          onClick={() => setTab("gancnn")}
+        >
+          cat gan · cnn
+        </button>
+        <button
           class={tab() === "glyphs" ? "tab active" : "tab"}
           onClick={() => setTab("glyphs")}
         >
@@ -404,8 +413,15 @@ export default function App() {
                 <Show
                   when={tab() === "gangrad"}
                   fallback={
-                    <Show when={tab() === "glyphs"} fallback={<SatLab />}>
-                      <GlyphGan />
+                    <Show
+                      when={tab() === "gancnn"}
+                      fallback={
+                        <Show when={tab() === "glyphs"} fallback={<SatLab />}>
+                          <GlyphGan />
+                        </Show>
+                      }
+                    >
+                      <CatCnn />
                     </Show>
                   }
                 >
@@ -1159,6 +1175,8 @@ type CatTrack = {
   errorLabel: string;
 };
 
+type SampleSource = "trained" | "all";
+
 const CAT_SAT: CatTrack = {
   dir: "gan/sat",
   title: "This cat is a circuit.",
@@ -1195,6 +1213,12 @@ function CatGan(props: { track: CatTrack }) {
   const [info, setInfo] = createSignal<GanMeta | null>(null);
   const [status, setStatus] = createSignal("loading generator circuit…");
   const [auto, setAuto] = createSignal(false);
+  // The gradient track only saw a drawing for most, not all, of its codes;
+  // the rest are extrapolation, which is what made the tab look cloudy.
+  // Default to the codes the trainer actually fitted.
+  const [source, setSource] = createSignal<SampleSource>(
+    props.track.method === "grad" ? "trained" : "all",
+  );
   const [latentHex, setLatentHex] = createSignal("");
   const [density, setDensity] = createSignal(0);
   const [spread, setSpread] = createSignal(0);
@@ -1208,20 +1232,38 @@ function CatGan(props: { track: CatTrack }) {
     return code;
   };
 
+  const latentOf = (code: string, bits: number): Uint8Array => {
+    const latent = new Uint8Array(bits);
+    for (let i = 0; i < bits; i += 1) latent[i] = code[i] === "1" ? 1 : 0;
+    return latent;
+  };
+
   const generate = (
     meta: GanMeta,
     rng: () => number = Math.random,
+    mode: SampleSource = source(),
   ): { density: number; spread: number; fitted: number; error: number } | null => {
     const canvas = canvasRef;
     if (!canvas || circuitJson === "") return null;
 
+    const trained = meta.codes
+      .map((entry, index) => ({ entry, index }))
+      .filter((item) => item.entry.trained);
+    const offset = trained.length > 0 ? Math.floor(rng() * trained.length) : 0;
+
     const tiles = GAN_GRID * GAN_GRID;
     const samples: Uint8Array[] = [];
     const codes: number[] = [];
-    let firstLatent = new Uint8Array(meta.latent);
+    let firstLatent: Uint8Array = new Uint8Array(meta.latent);
     for (let t = 0; t < tiles; t += 1) {
-      const latent = new Uint8Array(meta.latent);
-      for (let i = 0; i < latent.length; i += 1) latent[i] = rng() < 0.5 ? 1 : 0;
+      let latent: Uint8Array;
+      if (mode === "trained" && trained.length > 0) {
+        const pick = trained[(t + offset) % trained.length];
+        latent = latentOf(pick.entry.code, meta.latent);
+      } else {
+        latent = new Uint8Array(meta.latent);
+        for (let i = 0; i < latent.length; i += 1) latent[i] = rng() < 0.5 ? 1 : 0;
+      }
       if (t === 0) firstLatent = latent;
       codes.push(codeOf(latent));
       samples.push(run_circuit(circuitJson, latent));
@@ -1298,6 +1340,12 @@ function CatGan(props: { track: CatTrack }) {
   const reroll = () => {
     const meta = info();
     if (meta) generate(meta);
+  };
+
+  const chooseSource = (mode: SampleSource) => {
+    setSource(mode);
+    const meta = info();
+    if (meta) generate(meta, Math.random, mode);
   };
 
   const toggleAuto = () => {
@@ -1379,8 +1427,29 @@ function CatGan(props: { track: CatTrack }) {
           <button class={auto() ? "sample on" : "sample"} onClick={toggleAuto}>
             {auto() ? "stop" : "auto-roll"}
           </button>
+          <Show when={info() && info()!.trained > 0}>
+            <button
+              class={source() === "trained" ? "sample on" : "sample"}
+              onClick={() => chooseSource("trained")}
+            >
+              trained codes
+            </button>
+            <button
+              class={source() === "all" ? "sample on" : "sample"}
+              onClick={() => chooseSource("all")}
+            >
+              all codes
+            </button>
+          </Show>
         </div>
         <p class="status">{status()}</p>
+        <p class="hint">
+          {info()
+            ? props.track.method === "grad"
+              ? `Only ${info()!.trained} of the ${2 ** info()!.latent} codes were shown a drawing during training. Trained codes show those drawings; all codes samples the rest of the key space, which is the same wiring extrapolating and is much cloudier.`
+              : `Every tile is one key pushed through the solver's wiring. All codes samples the full key space; trained codes shows only the ones a drawing was fitted to.`
+            : ""}
+        </p>
       </div>
 
       <div class="gan-side">
@@ -1419,7 +1488,7 @@ function CatGan(props: { track: CatTrack }) {
           </div>
         </div>
         <p class="hint">
-          latent <code class="ganhex">{latentHex()}</code>
+          first key <code class="ganhex">{latentHex()}</code>
         </p>
         <p class="hint">{info()?.note}</p>
       </div>
@@ -1428,8 +1497,363 @@ function CatGan(props: { track: CatTrack }) {
 }
 
 // ---------------------------------------------------------------------------
+// Cat CNN tab: the smooth comparison. This is a regular convolutional decoder,
+// not a circuit: an 8-bit key is embedded, expanded to a 4x4x16 map, and
+// upsampled twice with 3x3 convolutions. Its output is a probability per pixel,
+// so it can draw soft edges -- which is exactly what a literal gate cannot do.
+//
+// The weights come from scripts/train_cnn_generator.rs (std-only Rust, trained
+// offline on the same 200 Quick Draw cats). The browser only runs the forward
+// pass; nothing is trained here.
 // ---------------------------------------------------------------------------
-// Glyph GAN tab: a *generator*, not an autoencoder.
+
+type CnnModel = {
+  kind: string;
+  side: number;
+  latent: number;
+  trained: number;
+  params: number;
+  epochs: number;
+  loss: number;
+  note: string;
+  embed: number[];
+  w1: number[];
+  b1: number[];
+  w2: number[];
+  b2: number[];
+  c1w: number[];
+  c1b: number[];
+  c2w: number[];
+  c2b: number[];
+  c3w: number[];
+  c3b: number[];
+};
+
+const CNN_EMB = 32;
+const CNN_HID = 128;
+const CNN_MAP = 4;
+const CNN_MAP_C = 16;
+const CNN_C1 = 8;
+const CNN_C2 = 4;
+const CNN_SCALE = 2; // draw each 32x32 tile at 64x64, then let CSS smooth it
+
+function cnnConv3(
+  input: Float32Array,
+  h: number,
+  w: number,
+  cin: number,
+  weights: number[],
+  bias: number[],
+  cout: number,
+  relu: boolean,
+): Float32Array {
+  const out = new Float32Array(h * w * cout);
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      for (let co = 0; co < cout; co += 1) {
+        let sum = bias[co];
+        for (let ky = 0; ky < 3; ky += 1) {
+          const iy = y + ky - 1;
+          if (iy < 0 || iy >= h) continue;
+          for (let kx = 0; kx < 3; kx += 1) {
+            const ix = x + kx - 1;
+            if (ix < 0 || ix >= w) continue;
+            const row = (iy * w + ix) * cin;
+            const base = ((co * cin) * 3 + ky) * 3 + kx;
+            for (let ci = 0; ci < cin; ci += 1) {
+              sum += weights[base + ci * 9] * input[row + ci];
+            }
+          }
+        }
+        out[(y * w + x) * cout + co] = relu ? Math.max(0, sum) : sum;
+      }
+    }
+  }
+  return out;
+}
+
+function cnnUpsample(input: Float32Array, h: number, w: number, c: number): Float32Array {
+  const out = new Float32Array(4 * h * w * c);
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      for (let ch = 0; ch < c; ch += 1) {
+        const value = input[(y * w + x) * c + ch];
+        for (let dy = 0; dy < 2; dy += 1) {
+          for (let dx = 0; dx < 2; dx += 1) {
+            out[((y * 2 + dy) * (w * 2) + x * 2 + dx) * c + ch] = value;
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function cnnForward(model: CnnModel, code: number): Float32Array {
+  const e = model.embed.slice(code * CNN_EMB, (code + 1) * CNN_EMB);
+
+  const h1 = new Float32Array(CNN_HID);
+  for (let j = 0; j < CNN_HID; j += 1) {
+    let sum = model.b1[j];
+    const row = j * CNN_EMB;
+    for (let i = 0; i < CNN_EMB; i += 1) sum += e[i] * model.w1[row + i];
+    h1[j] = Math.max(0, sum);
+  }
+
+  const mapN = CNN_MAP * CNN_MAP * CNN_MAP_C;
+  const h2 = new Float32Array(mapN);
+  for (let j = 0; j < mapN; j += 1) {
+    let sum = model.b2[j];
+    const row = j * CNN_HID;
+    for (let i = 0; i < CNN_HID; i += 1) sum += h1[i] * model.w2[row + i];
+    h2[j] = Math.max(0, sum);
+  }
+
+  const up1 = cnnUpsample(h2, CNN_MAP, CNN_MAP, CNN_MAP_C);
+  const o1 = cnnConv3(up1, 8, 8, CNN_MAP_C, model.c1w, model.c1b, CNN_C1, true);
+  const up2 = cnnUpsample(o1, 8, 8, CNN_C1);
+  const o2 = cnnConv3(up2, 16, 16, CNN_C1, model.c2w, model.c2b, CNN_C2, true);
+  const up3 = cnnUpsample(o2, 16, 16, CNN_C2);
+  const o3 = cnnConv3(up3, 32, 32, CNN_C2, model.c3w, model.c3b, 1, false);
+
+  for (let i = 0; i < o3.length; i += 1) {
+    const value = o3[i];
+    o3[i] = value >= 0 ? 1 / (1 + Math.exp(-value)) : Math.exp(value) / (1 + Math.exp(value));
+  }
+  return o3;
+}
+
+function CatCnn() {
+  const params = new URLSearchParams(window.location.search);
+  let canvasRef: HTMLCanvasElement | undefined;
+  let model: CnnModel | null = null;
+  let timer: number | undefined;
+
+  const [info, setInfo] = createSignal<CnnModel | null>(null);
+  const [status, setStatus] = createSignal("loading CNN weights…");
+  const [auto, setAuto] = createSignal(false);
+  const [source, setSource] = createSignal<SampleSource>("trained");
+  const [codeHex, setCodeHex] = createSignal("");
+  const [density, setDensity] = createSignal(0);
+  const [spread, setSpread] = createSignal(0);
+
+  const generate = (
+    meta: CnnModel,
+    rng: () => number = Math.random,
+    mode: SampleSource = source(),
+  ): { density: number; spread: number } | null => {
+    const canvas = canvasRef;
+    if (!canvas) return null;
+
+    const tile = meta.side * CNN_SCALE;
+    const step = tile + GAN_GAP;
+    const full = step * GAN_GRID - GAN_GAP;
+    canvas.width = full;
+    canvas.height = full;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.clearRect(0, 0, full, full);
+
+    const offscreen = document.createElement("canvas");
+    offscreen.width = meta.side;
+    offscreen.height = meta.side;
+    const octx = offscreen.getContext("2d");
+    if (!octx) return null;
+
+    const codes: number[] = [];
+    const images: Float32Array[] = [];
+    const offset = mode === "trained" ? Math.floor(rng() * Math.max(1, meta.trained)) : 0;
+    for (let t = 0; t < GAN_GRID * GAN_GRID; t += 1) {
+      const code =
+        mode === "trained" && meta.trained > 0
+          ? (t + offset) % meta.trained
+          : Math.floor(rng() * 2 ** meta.latent);
+      const image = cnnForward(meta, code);
+      codes.push(code);
+      images.push(image);
+
+      const data = octx.createImageData(meta.side, meta.side);
+      for (let i = 0; i < image.length; i += 1) {
+        const value = Math.round(image[i] * 255);
+        data.data[i * 4] = value;
+        data.data[i * 4 + 1] = value;
+        data.data[i * 4 + 2] = value;
+        data.data[i * 4 + 3] = 255;
+      }
+      octx.putImageData(data, 0, 0);
+      const ox = (t % GAN_GRID) * step;
+      const oy = Math.floor(t / GAN_GRID) * step;
+      context.drawImage(offscreen, ox, oy, tile, tile);
+    }
+
+    // Mean probability is ink; mean pairwise L1 is how different the samples are.
+    let total = 0;
+    for (const image of images) {
+      for (const value of image) total += value;
+    }
+    const densityValue = total / (images.length * images[0].length);
+    let difference = 0;
+    let pairs = 0;
+    for (let i = 0; i < images.length; i += 1) {
+      for (let j = i + 1; j < images.length; j += 1) {
+        let sum = 0;
+        for (let k = 0; k < images[i].length; k += 1) {
+          sum += Math.abs(images[i][k] - images[j][k]);
+        }
+        difference += sum / images[i].length;
+        pairs += 1;
+      }
+    }
+    const spreadValue = difference / pairs;
+
+    setCodeHex(codes[0].toString(16).padStart(2, "0"));
+    setDensity(densityValue);
+    setSpread(spreadValue);
+    return { density: densityValue, spread: spreadValue };
+  };
+
+  const reroll = () => {
+    if (model) generate(model);
+  };
+
+  const chooseSource = (mode: SampleSource) => {
+    setSource(mode);
+    if (model) generate(model, Math.random, mode);
+  };
+
+  const toggleAuto = () => {
+    if (timer !== undefined) {
+      window.clearInterval(timer);
+      timer = undefined;
+      setAuto(false);
+      return;
+    }
+    reroll();
+    timer = window.setInterval(reroll, 1500);
+    setAuto(true);
+  };
+
+  onCleanup(() => {
+    if (timer !== undefined) window.clearInterval(timer);
+  });
+
+  onSettled(() => {
+    void (async () => {
+      try {
+        const json = await fetchJson<CnnModel>(asset("gan/cnn/model.json"));
+        await wasmReady; // shared init; the forward pass itself is plain JS
+        model = json;
+        setInfo(json);
+        setStatus(
+          `ready · ${json.params.toLocaleString()} weights · ${json.latent}-bit key · ` +
+            `${json.trained} trained codes · ${json.epochs} epochs`,
+        );
+        if (params.get("selftest") === "1") {
+          const stats = generate(json, mulberry32(7));
+          setStatus(
+            `self-test · gan/cnn · ${json.params} weights · ` +
+              `density ${((stats?.density ?? 0) * 100).toFixed(1)}% · ` +
+              `spread ${((stats?.spread ?? 0) * 100).toFixed(1)}%`,
+          );
+        } else {
+          generate(json);
+        }
+      } catch (error) {
+        setStatus(`could not load the CNN: ${String(error)}`);
+      }
+    })();
+  });
+
+  return (
+    <section class="ganlab">
+      <div class="gan-head">
+        <h2>This cat is a CNN.</h2>
+        <p class="hint">
+          A regular convolutional decoder trained on the same {info()?.trained ?? 200} Quick Draw
+          cats: an 8-bit key is embedded, expanded to a 4×4×16 map, then upsampled twice with 3×3
+          convolutions. Its output is a probability per pixel, so it can draw soft edges. The
+          circuit tabs can only return 0 or 1.
+        </p>
+      </div>
+
+      <div class="gan-panel">
+        <canvas ref={canvasRef} class="gancanvas smooth" width={128} height={128} />
+        <div class="gan-actions">
+          <button class="sample" onClick={reroll}>
+            generate 16
+          </button>
+          <button class={auto() ? "sample on" : "sample"} onClick={toggleAuto}>
+            {auto() ? "stop" : "auto-roll"}
+          </button>
+          <button
+            class={source() === "trained" ? "sample on" : "sample"}
+            onClick={() => chooseSource("trained")}
+          >
+            trained codes
+          </button>
+          <button
+            class={source() === "all" ? "sample on" : "sample"}
+            onClick={() => chooseSource("all")}
+          >
+            all codes
+          </button>
+        </div>
+        <p class="status">{status()}</p>
+        <p class="hint">
+          Trained codes are the 200 drawings. All codes samples the same 8-bit space the circuit
+          tabs sample, including the 56 keys the CNN never saw; those are smooth blends, not
+          memorised drawings.
+        </p>
+      </div>
+
+      <div class="gan-side">
+        <div class="ganstats">
+          <div>
+            <span>weights</span>
+            <strong>{info() ? info()!.params.toLocaleString() : "–"}</strong>
+          </div>
+          <div>
+            <span>latent</span>
+            <strong>{info() ? `${info()!.latent} bits` : "–"}</strong>
+          </div>
+          <div>
+            <span>trained codes</span>
+            <strong>{info()?.trained ?? "–"}</strong>
+          </div>
+          <div>
+            <span>epochs</span>
+            <strong>{info()?.epochs ?? "–"}</strong>
+          </div>
+          <div>
+            <span>train BCE</span>
+            <strong>{info() ? info()!.loss.toFixed(3) : "–"}</strong>
+          </div>
+          <div>
+            <span>density</span>
+            <strong>{(density() * 100).toFixed(1)}%</strong>
+          </div>
+          <div>
+            <span>spread</span>
+            <strong>{(spread() * 100).toFixed(1)}%</strong>
+          </div>
+          <div>
+            <span>first code</span>
+            <strong>0x{codeHex()}</strong>
+          </div>
+        </div>
+        <p class="hint">
+          The circuit tabs' output is a binary image; this one is continuous, which is the whole
+          difference between a wire and a weight.
+        </p>
+        <p class="hint">{info()?.note}</p>
+      </div>
+    </section>
+  );
+}
+
+
 //
 // `scripts/sat_ae.py --mode generate --gate nandinv --letters 26 --distance 3`
 // asks for a circuit that turns an 8-bit latent into an 8x8 image, where

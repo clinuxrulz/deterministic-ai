@@ -531,6 +531,12 @@ button:focus,
   image-rendering: pixelated;
 }
 
+/* The CNN tab draws continuous values; let the browser interpolate instead of
+ * showing 32x32 blocks the way the binary circuit tabs want. */
+.gancanvas.smooth {
+  image-rendering: auto;
+}
+
 .gan-actions {
   display: flex;
   gap: 0.5rem;

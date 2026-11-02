@@ -74,6 +74,8 @@ def main() -> int:
     parser.add_argument("--targets", default="data/quickdraw_cats_32.json")
     parser.add_argument("--out", default="web/public/gan/grad")
     parser.add_argument("--limit", type=int, default=0, help="0 = every drawing")
+    parser.add_argument("--generator", action="store_true",
+                        help="target i is code i (generator mode); inferred from an empty encoder otherwise")
     args = parser.parse_args()
 
     model = json.loads(Path(args.model).read_text())
@@ -93,6 +95,13 @@ def main() -> int:
                          f"targets are {side}x{side}")
 
     encoder, decoder = model["encoder"], model["decoder"]
+    # Generator runs write a zero-gate pass-through encoder (it is never used:
+    # the demo reads the decoder directly), so that is the reliable signature.
+    generator = (
+        args.generator
+        or bool(model.get("config", {}).get("generator", False))
+        or len(encoder.get("gates", [])) == 0
+    )
     n_codes = 1 << key_bits
 
     # Every image the wiring can produce, in code order (little-endian key).
@@ -109,17 +118,28 @@ def main() -> int:
     ]
     seen: dict[int, int] = {}
     wrong_by_code: dict[int, int] = {}
-    for index, cat in enumerate(targets):
-        key = evaluate(encoder, cat)
-        code = sum(bit << i for i, bit in enumerate(key))
-        wrong = sum(a != b for a, b in zip(images[code], cat))
-        if code in seen:
-            # Two drawings landed on one code: keep the closer decode and
-            # report the collision rather than silently overwriting.
-            wrong_by_code[code] = min(wrong_by_code[code], wrong)
-        else:
+    if generator:
+        # In generator mode there is no trained encoder: drawing i *is* code i
+        # (the trainer pins row `i % generator_codes` to that drawing).
+        for index, cat in enumerate(targets):
+            if index >= n_codes:
+                break
+            code = index
+            wrong = sum(a != b for a, b in zip(images[code], cat))
             seen[code] = index
             wrong_by_code[code] = wrong
+    else:
+        for index, cat in enumerate(targets):
+            key = evaluate(encoder, cat)
+            code = sum(bit << i for i, bit in enumerate(key))
+            wrong = sum(a != b for a, b in zip(images[code], cat))
+            if code in seen:
+                # Two drawings landed on one code: keep the closer decode and
+                # report the collision rather than silently overwriting.
+                wrong_by_code[code] = min(wrong_by_code[code], wrong)
+            else:
+                seen[code] = index
+                wrong_by_code[code] = wrong
 
     for code, wrong in wrong_by_code.items():
         codes[code]["trained"] = True
@@ -159,12 +179,20 @@ def main() -> int:
             f"through a {key_bits}-bit key by the NAND trainer (Gödel "
             f"relaxation z = 1 - min(u,v), then snapped to hard gates). The "
             f"circuit here is that model's decoder: {len(decoder['gates'])} "
-            f"literal NAND gates, no weights. The encoder assigned "
-            f"{len(seen)} distinct codes to the {len(targets)} drawings "
-            f"({collisions} collisions); those codes reconstruct their "
-            f"cat at {ber * 100:.1f}% wrong bits on average, and the "
-            f"other {n_codes - len(seen)} codes are what the same wiring invents. "
-            f"Compare the SAT tab: it fits 4 codes bit-exactly at the same "
+            f"literal NAND gates, no weights. "
+            + (
+                f"Each drawing owns code i, so {len(seen)} of {n_codes} codes "
+                f"are fitted and reconstruct their cat at {ber * 100:.1f}% "
+                f"wrong bits on average; the other {n_codes - len(seen)} codes "
+                f"are what the same wiring invents. "
+                if generator
+                else f"The encoder assigned {len(seen)} distinct codes to the "
+                f"{len(targets)} drawings ({collisions} collisions); those codes "
+                f"reconstruct their cat at {ber * 100:.1f}% wrong bits on "
+                f"average, and the other {n_codes - len(seen)} codes are what "
+                f"the same wiring invents. "
+            )
+            + f"Compare the SAT tab: it fits 4 codes bit-exactly at the same "
             f"gate count."
         ),
     }

@@ -929,13 +929,7 @@ fn generator_ber(
     let mut arena = Vec::new();
     let mut recon = Vec::new();
     circuit.eval_into(&planes, words, &mut arena, &mut recon);
-    let errors = plane_hamming(
-        &recon,
-        &image_batch.planes,
-        image_batch.cols,
-        words,
-        n,
-    );
+    let errors = plane_hamming(&recon, &image_batch.planes, image_batch.cols, words, n);
     Ok(errors as f32 / (n * image_batch.cols).max(1) as f32)
 }
 
@@ -1519,9 +1513,12 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
                     target[c * batch + s] = v;
                 }
                 if cfg.generator {
-                    // Fixed code per drawing: row r is cat r % n_cats, so the
-                    // three training copies of a cat share one key.
-                    let cat = row % n_cats;
+                    // Fixed code per drawing: dataset row `train_pool[row]` is
+                    // cat `train_pool[row] % n_cats`, so the copies of one cat
+                    // share a key. Using `row` (the position in a shuffled
+                    // batch) instead would hand one drawing a new key every
+                    // epoch and stop the decoder from ever learning a cat.
+                    let cat = train_pool[row] % n_cats;
                     for b in 0..trainer.net.n_inputs {
                         gen_input[b * batch + s] = ((cat >> b) & 1) as f32;
                     }
@@ -1589,12 +1586,10 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
         }
         if cfg.val_every > 0 && (epoch % cfg.val_every == 0 || epoch + 1 == cfg.epochs) {
             let ber = if cfg.generator {
-                let circuit =
-                    build_generator_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
+                let circuit = build_generator_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
                 generator_ber(&circuit, dataset, &train_pool, n_cats, cfg.key_bits).ok()
             } else {
-                let (encoder, decoder) =
-                    build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
+                let (encoder, decoder) = build_circuit(&trainer.net, &trainer.alpha, &trainer.beta);
                 let model = make_model(dataset, cfg, encoder, decoder);
                 crate::ga::evaluate_model(&model, dataset, &val_pool)
                     .ok()
@@ -1665,8 +1660,7 @@ pub fn run_nand(dataset: &Dataset, cfg: &NandConfig, out_dir: &Path) -> Result<M
         )?;
         eprintln!(
             "done: generator BER {:.4} over {n_cats} codes, active gates {active} / {} trained",
-            ber,
-            before
+            ber, before
         );
         return Ok(model);
     }
@@ -1811,6 +1805,8 @@ mod tests {
             ste: false,
             wire_ste: false,
             relaxation: Relaxation::Product,
+            generator: false,
+            generator_codes: 0,
             seed: 3,
             log_every: 0,
             val_every: 0,

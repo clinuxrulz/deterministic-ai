@@ -1259,6 +1259,102 @@ snapped to hard) tracks side by side.
 - If key_bits = 16 were tried, the code space would be 65536 decodes — refused
   here (> 12 bits) because rendering all of them would be too slow.
 
+## Checkpoint 15 (2026-11-02): the gradient key bug, and a CNN to compare against
+
+Two things happened after Checkpoint 14. The gradient result there (14 distinct
+codes, 186 collisions) was not the trainer's ceiling -- it was a bug. And the
+"cloudy" look of the gradient tab needed a control, so the demo gained a
+third Cat GAN track: a regular convolutional decoder trained on the same cats.
+
+### The generator key bug
+
+In generator mode the trainer assigned each drawing its key from its position in
+a shuffled batch:
+
+```rust
+let cat = row % n_cats;            // row = index within this batch
+```
+
+But `row` is not stable across epochs. Each drawing therefore got a *different*
+key every epoch, so the decoder was never shown a fixed key -> image pair and
+could only learn the average cat. The fix uses the dataset index:
+
+```rust
+let cat = train_pool[row] % n_cats;   // fixed per drawing
+```
+
+`train_pool[row] % n_cats` is the drawing's identity, so its copies share a key.
+Retraining the same config (`runs/quickdraw_grad_v2`, 800 epochs) gives:
+
+| | Checkpoint 14 (bug) | after the fix |
+|---|---|---|
+| distinct codes | 14 / 256 | **200 / 256** |
+| collisions | 186 | **0** |
+| generator BER | 0.2809 | **0.2677** |
+| gates | 2,494 | 2,652 |
+| depth | — | 8 |
+| live key bits | 8 / 8 | 8 / 8 |
+
+The export script had a matching assumption: it always ran the model's *encoder*
+to find each drawing's key. Generator runs write a zero-gate pass-through
+encoder (never used), so the script exported 1 code / 199 collisions. It now
+detects generator mode (zero-gate encoder or `config.generator`) and assigns
+target `i` to code `i`.
+
+### Is the fixed gradient track any clearer?
+
+Not enormously. All 200 trained codes decode to recognisable cat-ish blobs, but
+the pairwise spread across codes is only ~3.8%: the wiring has learned the
+shared shape of a Quick Draw cat, not the individual drawings. Two smaller runs
+on 16 cats show the same thing:
+
+| run | relaxation | positive weight | BER | gates |
+|---|---|---|---|---|
+| `quickdraw_grad_16` | Gödel `min` | 2.0 | 0.2062 | 2,709 |
+| `quickdraw_grad_16_prod` | product | 1.0 | **0.1748** | 2,440 |
+
+Lower BER, still one fat blob. This repeats the standing result that the wiring
+cannot express 200 distinct drawings: the same 2,652-gate budget buys 4
+*bit-exact* codes from SAT (`--gate nandinv`) versus 200 approximate ones from
+gradients. The gradient tab therefore defaults to **trained codes**, because
+the other 56 keys are pure extrapolation and are the cloudiest part of the
+grid; an `all codes` button still samples the full space.
+
+### The CNN comparison
+
+The circuit tabs can only return 0 or 1, which is a hard ceiling on how smooth
+an edge can be. To make that visible, the demo now ships a regular
+convolutional decoder trained offline on the same 200 Quick Draw cats:
+
+- `scripts/make_quickdraw_cnn_data.py` rasterises the Quick Draw strokes to
+  32x32 bits in pure Python (no numpy/PIL), writing a `QCNN` file.
+- `scripts/train_cnn_generator.rs` is a std-only Rust trainer (plain `rustc`,
+  no workspace dependency). It is a conditional decoder: 8-bit key ->
+  32-d embedding -> 128 -> 4x4x16, then nearest-neighbour 2x upsampling with
+  3x3 conv/ReLU at 8x8 and 16x16 and a 3x3 sigmoid head at 32x32.
+- **46,929 weights**, 1,500 epochs, train BCE 0.079, MSE 0.024. It memorises
+  the 200 trained codes closely enough that the outputs read as individual
+  cats, and the 56 free codes are smooth blends.
+- Shipped as `web/public/gan/cnn/model.json`; the browser runs the forward pass
+  in TypeScript and lets the canvas interpolate (`.gancanvas.smooth`).
+
+This is explicitly a *comparison*, not a circuit: it has no determinism or
+hardware argument, it is there to show what the missing thing (continuous
+output) buys. `?tab=cnn&selftest=1` renders a deterministic grid
+(`density 19.8% · spread 26.1%`, about 7x the gradient track's spread).
+
+### Files modified
+
+- `crates/cli/src/nand.rs` — generator key uses `train_pool[row] % n_cats`
+- `scripts/export_trained_gan.py` — generator-mode detection, `--generator`
+- `scripts/make_quickdraw_cnn_data.py` — new Quick Draw -> `QCNN` rasteriser
+- `scripts/train_cnn_generator.rs` — new std-only CNN decoder trainer
+- `web/public/gan/cnn/model.json` — exported CNN weights
+- `web/public/gan/grad/` — 200-code generator export
+- `web/src/App.tsx` — `cat gan · cnn` tab, trained/all sample toggle
+- `web/src/App.css` — `.gancanvas.smooth`
+- `AGENTS.md`, `docs/experiment.md` — this checkpoint
+
 ---
 ## Checkpoint 12 (2026-10-31): choosing the wiring with a SAT solver
 

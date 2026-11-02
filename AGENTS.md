@@ -33,22 +33,31 @@ described by its wiring.
 It is the default entry in `web/public/models/index.json` and is verified in a
 headless browser (128 key bits, 8 samples, no JS errors).
 
-The demo has five tabs: **reconstruct** (the models above), **draw a digit**
-(MNIST autoencoder + NAND classifier), **cat gan**, **glyph gan**, and **solver's wiring**.
+The demo has seven tabs: **reconstruct** (the models above), **draw a digit**
+(MNIST autoencoder + NAND classifier), **cat gan · sat**, **cat gan · grad**,
+**cat gan · cnn**, **glyph gan**, and **solver's wiring**.
 The digit tab normalises
 a canvas stroke the way MNIST preprocessing does (bbox -> 20x20 -> centre of
 mass -> 28x28), encodes it, and runs the classifier circuit from
 `web/public/digits/classifier.json` via `run_circuit`. `?tab=digits&selftest=1`
 draws a built-in sample and classifies it, which is how it is verified headlessly.
 
-The **cat gan** tab samples a 96-bit latent, runs the generator circuit from
-`web/public/gan/circuit.json` (2,304 NAND gates, depth 4) through `run_circuit`
-and draws 16 samples in a 4x4 grid, with a density and spread readout. It is a
-placeholder: the circuit reproduces cat-image statistics (density, local
-texture) but not anatomy, and only about 15 of its 96 latent bits change the
-output — `effective_latent` in `web/public/gan/meta.json`, measured by flipping
-each bit offline. The tab is titled "This cat is not real."; `?tab=gan&selftest=1`
-renders a deterministic grid for headless checks.
+The **cat gan · sat** tab pins one Quick Draw cat per code with kissat and runs
+the resulting NAND/AND circuit from `web/public/gan/sat/`. It fits four codes
+bit-exactly; every tile is one key pushed through the same circuit. The
+**cat gan · grad** tab is the gradient track: an 8-bit code, 2,652 NAND gates,
+and the codes the NAND trainer assigned while learning. It defaults to *trained
+codes* because the rest of the 256-code space is extrapolation and looks
+cloudy; the *all codes* button samples it. `?tab=gangrad&selftest=1` prints a
+deterministic fit count.
+
+The **cat gan · cnn** tab is the smooth comparison. It is not a circuit: a
+regular convolutional decoder (46,929 weights, 8-bit key, 200 trained codes)
+is trained offline on the same 200 Quick Draw cats by
+`scripts/train_cnn_generator.rs` and shipped as
+`web/public/gan/cnn/model.json`. Its output is a probability per pixel, so the
+edges are soft; every tile is rendered from that continuous image, not from a
+0/1 gate. `?tab=cnn&selftest=1` renders a deterministic grid.
 
 The **glyph gan** tab is a *generator* rather than an autoencoder: `--mode
 generate` in `scripts/sat_ae.py` produces a circuit that turns an 8-bit
@@ -312,12 +321,22 @@ cargo run --release -p xorae -- export \
 | `crates/cli/src/ga.rs` | Genetic algorithm, fitness, evaluation |
 | `crates/cli/src/dataset.rs` | CIFAR loader, planar fix, `XAE4` format, palette/colour modes |
 | `crates/wasm/src/lib.rs` | `wasm-bindgen` bridge |
-| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions`/`subsets`/`generate`/`fit` modes, `--gate {nand,nandinv,xor3,xor2,mix}`, `--glyphs`/`--slack`/`--letters`/`--distance`/`--anchor`/`--targets`/`--free-background`/`--slack-block`/`--export` |\n| `scripts/fetch_quickdraw_cats.py` | Quick Draw `cat` category → binary bitmap JSON + preview contact sheet |\n| `scripts/render_gan.py` | render every code of an exported generator to a PNG, fitted codes boxed |\n| `scripts/make_quickdraw_dataset.py` | JSON → `XAE4` for `train-nand` (gradient track) |\n| `scripts/export_trained_gan.py` | export trained generator circuit → `web/public/gan/grad/` |\n| `configs/quickdraw_grad.toml` | gradient‑only generator config, `generator = true` |\n| `crates/cli/src/nand.rs` | `generator` mode, per-gate `inv`, `relaxation = "min"` |\n| `web/src/App.tsx` | two‑tab CatGan (SAT + gradient) |\n| `web/public/gan/grad/` | exported generator (8‑bit key, nandinv, 2494 gates) |\n| `AGENTS.md` | this file (new scripts + configs) |\n| `docs/experiment.md` | Checkpoint 13 (SAT ceiling) and Checkpoint 14 (gradient fallback) |,
+| `scripts/sat_ae.py` | SAT wiring search: encoder, solver driver, `selftest`/`brute`/`encoder`/`decoder`/`functions`/`subsets`/`generate`/`fit` modes, `--gate {nand,nandinv,xor3,xor2,mix}`, `--glyphs`/`--slack`/`--letters`/`--distance`/`--anchor`/`--targets`/`--free-background`/`--slack-block`/`--export` |
 | `scripts/fetch_quickdraw_cats.py` | Quick Draw `cat` category → binary bitmap JSON + preview contact sheet |
 | `scripts/render_gan.py` | render every code of an exported generator to a PNG, fitted codes boxed |
+| `scripts/make_quickdraw_dataset.py` | JSON → `XAE4` for `train-nand` (gradient track) |
+| `scripts/make_quickdraw_cnn_data.py` | pure-Python Quick Draw rasteriser → `QCNN` bits for the CNN trainer |
+| `scripts/train_cnn_generator.rs` | std-only Rust CNN decoder trainer → `web/public/gan/cnn/model.json` |
+| `scripts/export_trained_gan.py` | export trained generator circuit → `web/public/gan/grad/` |
+| `configs/quickdraw_grad.toml` | gradient-only generator config, `generator = true` |
+| `crates/cli/src/nand.rs` | `generator` mode, per-gate `inv`, `relaxation = "min"`, stable key per drawing |
+| `web/src/App.tsx` | Solid 2.0 UI, three CatGan tracks (SAT, gradient, CNN) |
+| `web/public/gan/grad/` | exported generator (8-bit key, nandinv, 2,652 gates, 200 codes) |
+| `web/public/gan/cnn/` | exported CNN decoder (46,929 weights, 8-bit key, 200 codes) |
+| `AGENTS.md` | this file (new scripts + configs) |
+| `docs/experiment.md` | Checkpoints 13-15 (SAT ceiling, gradient fallback, CNN comparison) |
 | `scripts/circuit_cones.py` | exact dependency cones of every wire: what an output *can* depend on |
 | `scripts/make_glyph_dataset.py` | writes the 8×8 glyphs as `XAE4` so `train-nand` can train on the same data |
-| `web/src/App.tsx` | Solid 2.0 UI |
 
 ## How the NAND trainer works
 
