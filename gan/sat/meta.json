@@ -1,0 +1,132 @@
+{
+  "kind": "quickdraw cat generator",
+  "gate": "nandinv",
+  "shape": "4-16-16-32-64-128-256-512-1024",
+  "side": 32,
+  "latent": 4,
+  "outputs": 1024,
+  "gates": 2048,
+  "depth": 8,
+  "trained": 2,
+  "free": 14,
+  "slack": 0,
+  "ber": 0.0,
+  "exact": 2,
+  "worst": 0,
+  "distinct": 3,
+  "effective_latent": 2,
+  "source": "quickdraw_cats_32.json",
+  "source_items": [
+    {
+      "line": 12,
+      "key_id": "4732270302724096",
+      "ink": 0.2178
+    },
+    {
+      "line": 1680,
+      "key_id": "5955138978054144",
+      "ink": 0.2178
+    }
+  ],
+  "solver": "kissat",
+  "seconds": 13.7,
+  "codes": [
+    {
+      "code": "0000",
+      "trained": true,
+      "wrong": 0,
+      "ink": 0.218
+    },
+    {
+      "code": "1000",
+      "trained": true,
+      "wrong": 0,
+      "ink": 0.218
+    },
+    {
+      "code": "0100",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "1100",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "0010",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "1010",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.23
+    },
+    {
+      "code": "0110",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "1110",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.23
+    },
+    {
+      "code": "0001",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "1001",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "0101",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "1101",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "0011",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "1011",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.23
+    },
+    {
+      "code": "0111",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.218
+    },
+    {
+      "code": "1111",
+      "trained": false,
+      "wrong": null,
+      "ink": 0.23
+    }
+  ],
+  "note": "kissat chose one wiring for 2 of the 200 Quick Draw cats in quickdraw_cats_32.json; every gate is NAND or AND. Codes 0-1 are those drawings, fitted to within 0 wrong bits each; the other 14 codes were never shown a target and are whatever the same wiring computes. A gate has only a handful of bits of wiring freedom, so 2048 gates hold a few 32x32 drawings, not two hundred -- the rest of the code space is extrapolation, not retrieval."
+}
